@@ -5,6 +5,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: '/Phase-Vortex-Arena/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
