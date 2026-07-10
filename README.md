@@ -8,6 +8,10 @@
 
 > **Core idea:** no other game uses wave interference as the primary combat mechanic. This is the first attempt to bring **fractal combat** to the MOBA genre, designed for gamepad and touch controls.
 
+
+**Live Demo:** 
+- [https://neuroidss.github.io/Phase-Vortex-Arena/](https://neuroidss.github.io/Phase-Vortex-Arena/)
+
 ---
 
 ## 🎮 Gameplay Overview
