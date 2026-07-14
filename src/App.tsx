@@ -2,6 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import { PhaseVortexArena, Cultivator } from './lib/physics/Arena';
 import { WebGLFluidRenderer } from './lib/WebGLRenderer';
 import { CONFIG, SEMANTIC_PILLS_DB, PillConfig } from './lib/config';
+import { TouchControls } from './lib/TouchControls';
+import { neuroService } from './lib/NeuroService';
+import { multiplayerService } from './lib/MultiplayerService';
+import { audioEngine } from './lib/AudioEngine';
 
 export default function App() {
   const [gameState, setGameState] = useState<'MENU' | 'ARENA'>('MENU');
@@ -9,14 +13,13 @@ export default function App() {
   
   const [p1Pill, setP1Pill] = useState<string>("Pure Yang Core");
   const [p2Pill, setP2Pill] = useState<string>("Deep Yin Core");
-  const [mode, setMode] = useState<"PvsB" | "BvsB">("PvsB");
+  const [mode, setMode] = useState<"PvsB" | "BvsB" | "PvsP">("PvsB");
   const [teamSize, setTeamSize] = useState<number>(1);
   const [numElements, setNumElements] = useState<number>(3);
   const [gridRes, setGridRes] = useState<number>(80);
   const [useWebGL, setUseWebGL] = useState<boolean>(true);
   const [gpuEnabled, setGpuEnabled] = useState<boolean>(true);
   
-  // 11 Интерактивных слайдеров калибровки для нейрофидбека
   const [settings, setSettings] = useState({
      hbar: 120.0,
      decay: 0.9992,
@@ -45,6 +48,35 @@ export default function App() {
   const [botInfo, setBotInfo] = useState<Cultivator | null>(null);
   const [time, setTime] = useState(0);
   const [fps, setFps] = useState(0);
+  const [touchMove, setTouchMove] = useState({ dx: 0, dy: 0 });
+  const touchKeys = useRef<{ [key: string]: boolean }>({});
+  
+  // P2P State
+  const [myId, setMyId] = useState('');
+  const [peerId, setPeerId] = useState('');
+  const [p2pConnected, setP2pConnected] = useState(false);
+  const peerInputRef = useRef<{ vx: number, vy: number, tq: number, freq: number, spatial: number } | null>(null);
+  const neuroInputRef = useRef<{ vx: number, vy: number, tq: number, freq: number, spatial: number } | null>(null);
+
+  useEffect(() => {
+    const id = Math.random().toString(36).substring(7);
+    setMyId(id);
+    multiplayerService.init(id);
+    multiplayerService.onPlayerJoined = (id) => {
+       setP2pConnected(true);
+       console.log("Player joined:", id);
+    };
+    
+    multiplayerService.onStateUpdate = (id, data) => {
+       peerInputRef.current = data;
+    };
+    
+    neuroService.onData = (data) => {
+      if (data.isNeuro) {
+         neuroInputRef.current = data;
+      }
+    };
+  }, []);
 
   const keys = useRef<{ [key: string]: boolean }>({});
 
@@ -67,7 +99,6 @@ export default function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Инициализация WebGL-рендерера перед запуском игрового цикла
     if (useWebGL && !webglRendererRef.current && webglCanvasRef.current) {
       try {
         webglRendererRef.current = new WebGLFluidRenderer(
@@ -109,6 +140,26 @@ export default function App() {
       if (k['z']) freq -= 1;
       if (k['v']) spatial += 1;
       if (k['x']) spatial -= 1;
+      
+      // Touch Inputs
+      vx += touchMove.dx;
+      vy += touchMove.dy;
+      if (touchKeys.current['c']) freq += 1;
+      if (touchKeys.current['z']) freq -= 1;
+      
+      // Hardware Neuro Inputs (FreeEEG16 over BLE or Serial)
+      if (neuroInputRef.current) {
+         const n = neuroInputRef.current;
+         vx += n.vx;
+         vy += n.vy;
+         tq += n.tq;
+         freq += n.freq;
+         spatial += n.spatial;
+      }
+
+      if (mode === 'PvsP' && p2pConnected) {
+         multiplayerService.broadcast({ vx, vy, tq, freq, spatial });
+      }
 
       const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
       let gp = null;
@@ -158,10 +209,24 @@ export default function App() {
           arena.cultivators[0].spatialVal = spatial;
       }
 
+      if (mode === 'PvsP' && arena.cultivators[1]) {
+          const peerInput = peerInputRef.current;
+          if (peerInput) {
+             arena.cultivators[1].vx = peerInput.vx;
+             arena.cultivators[1].vy = peerInput.vy;
+             arena.cultivators[1].tq = peerInput.tq;
+             arena.cultivators[1].freqVal = peerInput.freq;
+             arena.cultivators[1].spatialVal = peerInput.spatial;
+          }
+          arena.cultivators[1].isPlayer = true;
+      }
+      
       arena.step(dt, settings);
       
       if (Math.floor(now / 100) !== Math.floor((now - dt * 1000) / 100)) {
-        setPlayerInfo({ ...arena.cultivators[0] });
+        const pInfo = { ...arena.cultivators[0] };
+        setPlayerInfo(pInfo);
+        audioEngine.update(Math.hypot(pInfo.vx, pInfo.vy), pInfo.shearStress, pInfo.KActive);
         setBotInfo({ ...(arena.cultivators.find(c => c.team === 1) || arena.cultivators[1]) });
         setTime(arena.time);
       }
@@ -177,7 +242,6 @@ export default function App() {
          [128, 255, 128]
       ];
 
-      // Отрисовка жидкостей на GPU (с передачей COM, угла и кастомных настроек!)
       if (useWebGL && webglRendererRef.current) {
          const p0 = arena.cultivators[0];
          const pxNorm = p0.pos.x / 800.0;
@@ -187,7 +251,6 @@ export default function App() {
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       
-      // Отрисовка жидкостей на CPU (с точной симуляцией аффинной матрицы для совпадения фонов)
       if (!useWebGL) {
           const id = ctx.createImageData(gridRes, gridRes);
           const data = id.data;
@@ -197,7 +260,6 @@ export default function App() {
              const x = i % gridRes;
              const y = Math.floor(i / gridRes);
              
-             // Чтобы убрать «выстреливающие» за край цветные линии на CPU, принудительно зануляем внешние границы
              if (x === 0 || x === gridRes - 1 || y === 0 || y === gridRes - 1) {
                 data[i * 4] = 12;
                 data[i * 4 + 1] = 12;
@@ -211,9 +273,6 @@ export default function App() {
                 const re = arena.fluid.density[ch * 2][i];
                 const im = arena.fluid.density[ch * 2 + 1][i];
                 const wave = re * Math.cos(tf * (1.0 - ch * 0.12)) - im * Math.sin(tf * (1.0 - ch * 0.12));
-                
-                // В Python используется чистый модуль волны: R = abs(wave).
-                // Мы полностью убираем высокочастотную синусоидальную решетку u_stripeFreq.
                 const w = Math.abs(wave) * settings.stripeContrast;
                 
                 rSum += colorsPalette[ch % colorsPalette.length][0] * w;
@@ -245,7 +304,6 @@ export default function App() {
           ctx.restore();
       }
 
-      // Отрисовка упругой структуры на холсте с преобразованием координат следящей камеры
       const p0 = arena.cultivators[0];
       const theta = -p0.angle;
       const cos_t = Math.cos(theta);
@@ -378,7 +436,27 @@ export default function App() {
                         <input type="checkbox" checked={gpuEnabled} onChange={e => setGpuEnabled(e.target.checked)} className="accent-cyan-400" /> GPU Sim (WebGL2)
                     </label>
                   </div>
+                  
                   <div className="flex gap-4 mb-4">
+                     <button className={`px-4 py-2 border ${mode === 'PvsP' ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`} onClick={() => setMode('PvsP')}>PvsP (P2P)</button>
+                  </div>
+                  {mode === 'PvsP' && (
+                     <div className="flex gap-4 mb-4 flex-col text-xs p-2 border border-cyan-800 bg-cyan-950/20">
+                       <p className="text-cyan-400">My ID: <span className="font-mono text-white">{myId}</span></p>
+                       <div className="flex gap-2">
+                         <input type="text" placeholder="Peer ID" value={peerId} onChange={e => setPeerId(e.target.value)} className="bg-slate-900 border border-slate-700 p-1 text-white flex-1" />
+                         <button className="bg-cyan-800 px-3 hover:bg-cyan-700 text-white" onClick={() => multiplayerService.connect(peerId)}>Connect</button>
+                       </div>
+                       <p className="text-green-400">{p2pConnected ? "Connected to Peer!" : "Waiting..."}</p>
+                     </div>
+                  )}
+                  
+                  <div className="flex gap-2 mb-4 flex-wrap">
+                    <button className="px-3 py-1 border border-indigo-500/50 text-indigo-400 text-xs hover:bg-indigo-900/30" onClick={() => neuroService.connectBLE()}>Connect FreeEEG16 BLE Array</button>
+                    <button className="px-3 py-1 border border-indigo-500/50 text-indigo-400 text-xs hover:bg-indigo-900/30" onClick={() => neuroService.connectUART()}>Connect UART EEG Dongle</button>
+                  </div>
+                  
+                  <div className="flex gap-4 mb-4">                     
                      <button className={`px-4 py-2 border ${teamSize === 1 ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`} onClick={() => setTeamSize(1)}>1v1</button>
                      <button className={`px-4 py-2 border ${teamSize === 3 ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`} onClick={() => setTeamSize(3)}>3v3</button>
                      <button className={`px-4 py-2 border ${teamSize === 5 ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`} onClick={() => setTeamSize(5)}>5v5</button>
@@ -448,6 +526,7 @@ export default function App() {
 
                      setArena(new PhaseVortexArena(p1Conf, p2Conf, teamSize, mode, gridRes, numElements, gpuEnabled));
                      setGameState('ARENA');
+                     audioEngine.start();
                   }}
                >
                   INITIALIZE ARENA
@@ -565,7 +644,12 @@ export default function App() {
           <span>TIME: {time.toFixed(2)}s</span>
           <span className="text-cyan-500">QUANTUM ALCHEMY REACTOR - PHASE VORTEX ENGINE</span>
         </div>
-      </div>
-    </div>
+
+        <TouchControls 
+          onMove={(dx, dy) => setTouchMove({dx, dy})} 
+          onAction={(action, active) => { touchKeys.current[action] = active; }} 
+        />
+      </div>    
+    </div>  
   );
 }
