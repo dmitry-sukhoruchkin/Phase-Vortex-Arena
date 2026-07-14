@@ -56,7 +56,6 @@ export class Cultivator {
   stars: number = 3;
   isDead: boolean = false;
 
-  // Аналитика ИИ и послематчевая статистика
   damageDealt: number = 0;
   damageTaken: number = 0;
   aiLog: string = "Analyzing battlefield...";
@@ -193,7 +192,6 @@ export class PhaseVortexArena {
     this.time += dt;
     const activeSettings = settings || { hbar: 120.0, decay: 0.9992, injectionRadius: 0.05, injectionIntensity: 150.0, cahnHilliardSharpen: 4.0, couplingStrength: 25.0, pacStrength: 6.5, springStiffness: 200.0, tensionTear: 2.0 };
 
-    // --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: ПЕРЕРАСЧЕТ ЦЕНТРА МАСС ПЕРЕД ШАГОМ ИИ ---
     for (const c of this.cultivators) {
       if (c.integrity < 0.15) {
          c.isDead = true;
@@ -210,7 +208,6 @@ export class PhaseVortexArena {
       c.pos.y = sumY / 16;
     }
 
-    // 1. Process AI bots (Auto-battler logic based on stars)
     for (const c of this.cultivators) {
       if (c.isDead) continue;
       if (c.stars === 0) {
@@ -380,7 +377,6 @@ export class PhaseVortexArena {
     const pCOM: [number, number] = [this.cultivators[0].pos.x / 800.0, this.cultivators[0].pos.y / 800.0];
     const bCOM: [number, number] = [this.cultivators[1] ? this.cultivators[1].pos.x / 800.0 : 0.7, this.cultivators[1] ? this.cultivators[1].pos.y / 800.0 : 0.5];
 
-    // Вращение векторов направления в мировое пространство (для GPU и CPU)
     const forwardP = -this.cultivators[0].vy;
     const strafeP = this.cultivators[0].vx;
     const pWorldVx = -Math.sin(this.cultivators[0].angle) * forwardP + Math.cos(this.cultivators[0].angle) * strafeP;
@@ -394,99 +390,110 @@ export class PhaseVortexArena {
     const pIntent: [number, number, number] = [pWorldVx, pWorldVy, this.cultivators[0].tq];
     const bIntent: [number, number, number] = [bWorldVx, bWorldVy, this.cultivators[1] ? this.cultivators[1].tq : 0];
 
-    // Мертвые сущности не должны генерировать волны на GPU
-    const pVecFiltered = this.cultivators[0].isDead ? [0,0,0] as [number, number, number] : this.cultivators[0].vector;
-    const bVecFiltered = (this.cultivators[1] && !this.cultivators[1].isDead) ? this.cultivators[1].vector : [0,0,0] as [number, number, number];
+    const N = this.fluid.N;
 
-    if (this.fluid instanceof GPUFluidSolver) {
-       this.fluid.step(dt, pCOM, bCOM, pIntent, bIntent, pVecFiltered, bVecFiltered, activeSettings);
-    } else {
-       const N = this.fluid.N;
-       for (const c of this.cultivators) {
-          if (c.isDead) continue; // Мертвые не инжектят волны на CPU
-
-          const forward = -c.vy;
-          const strafe = c.vx;
-          const worldVx = -Math.sin(c.angle) * forward + Math.cos(c.angle) * strafe;
-          const worldVy = -Math.cos(c.angle) * forward - Math.sin(c.angle) * strafe;
-          
-          const C = new Float32Array(16 * 16);
-          for(let i=0; i<16; i++) {
-             for(let j=0; j<16; j++) {
-                C[i*16 + j] = dX[i*16 + j] * worldVx * 0.05 + 
-                              dY[i*16 + j] * worldVy * 0.05 + 
-                              dTQ[i*16 + j] * c.tq * 1.5;
-             }
-          }
-
-          const node_radial_amp = new Float32Array(16);
-          const node_tangent_amp = new Float32Array(16);
-          for(let i=0; i<16; i++) {
-             for(let j=0; j<16; j++) {
-                const phase_diff = c.nodes[i].phase - c.nodes[j].phase;
-                node_radial_amp[i] += C[i * 16 + j] * Math.cos(phase_diff);
-                node_tangent_amp[i] += C[i * 16 + j] * Math.sin(phase_diff);
-             }
-          }
-
-          const cx_grid = Math.floor((c.pos.x / CONFIG.WIDTH) * N);
-          const cy_grid = Math.floor((c.pos.y / CONFIG.HEIGHT) * N);
-          const radius_wave = Math.floor(N * activeSettings.injectionRadius * 3.0); 
-          const tf = this.time * 12.0;
-          const phase_cos = Math.cos(tf);
-          const phase_sin = Math.sin(tf);
-
-          const intensity = activeSettings.injectionIntensity;
-
-          for (let y = -radius_wave; y <= radius_wave; y++) {
-            for (let x = -radius_wave; x <= radius_wave; x++) {
-              const gx = (cx_grid + x + N) % N;
-              const gy = (cy_grid + y + N) % N;
-              const distSq = x * x + y * y;
-              const weight = Math.exp(-distSq / (radius_wave * radius_wave * 0.4));
-              
-              if (weight > 0.01) {
-                const idx = gx + gy * N;
-                for (let ch = 0; ch < this.numElements; ch++) {
-                  const vectorVal = c.vector[ch];
-                  this.fluid.density[ch * 2][idx] += vectorVal * phase_cos * weight * intensity * dt;
-                  this.fluid.density[ch * 2 + 1][idx] += vectorVal * phase_sin * weight * intensity * dt;
-                }
-              }
-            }
-          }
-
-          for (let i = 0; i < 16; i++) {
-            const radX = c.nodes[i].x - c.pos.x;
-            const radY = c.nodes[i].y - c.pos.y;
-            const dist = Math.hypot(radX, radY) + 1e-5;
-            const normalX = radX / dist;
-            const normalY = radY / dist;
-            const tangentX = -normalY;
-            const tangentY = normalX;
-
-            let thrustMult = c.isPlayer ? 1500.0 : 85.0;
-            const thrustX = (node_radial_amp[i] * normalX + node_tangent_amp[i] * tangentX) * thrustMult;
-            const thrustY = (node_radial_amp[i] * normalY + node_tangent_amp[i] * tangentY) * thrustMult;
-
-            const pin_gx = Math.floor((c.nodes[i].x / CONFIG.WIDTH) * N);
-            const pin_gy = Math.floor((c.nodes[i].y / CONFIG.HEIGHT) * N);
-
-            for (let y = -2; y <= 2; y++) {
-              for (let x = -2; x <= 2; x++) {
-                const gx = (pin_gx + x + N) % N;
-                const gy = (pin_gy + y + N) % N;
-                const weight = Math.exp(-(x * x + y * y) / 2.0);
-                const idx = gx + gy * N;
-                
-                this.fluid.u_prev[idx] += thrustX * weight;
-                this.fluid.v_prev[idx] += thrustY * weight;
-              }
-            }
-          }
-       }
-       this.fluid.step(dt, pCOM, bCOM, pIntent, bIntent, activeSettings);
+    // Reset force and element wave source buffers before population
+    this.fluid.u_prev.fill(0);
+    this.fluid.v_prev.fill(0);
+    for (let c = 0; c < this.numElements * 2; c++) {
+      this.fluid.density_prev[c].fill(0);
     }
+
+    // Populate localized forces and waves from all active cultivators (unified CPU/GPU pipeline)
+    for (const c of this.cultivators) {
+      if (c.isDead) continue; 
+
+      const forward = -c.vy;
+      const strafe = c.vx;
+      const worldVx = -Math.sin(c.angle) * forward + Math.cos(c.angle) * strafe;
+      const worldVy = -Math.cos(c.angle) * forward - Math.sin(c.angle) * strafe;
+      
+      const C = new Float32Array(16 * 16);
+      for(let i=0; i<16; i++) {
+         for(let j=0; j<16; j++) {
+            C[i*16 + j] = dX[i*16 + j] * worldVx * 0.05 + 
+                          dY[i*16 + j] * worldVy * 0.05 + 
+                          dTQ[i*16 + j] * c.tq * 1.5;
+         }
+      }
+
+      const node_radial_amp = new Float32Array(16);
+      const node_tangent_amp = new Float32Array(16);
+      for(let i=0; i<16; i++) {
+         for(let j=0; j<16; j++) {
+            const phase_diff = c.nodes[i].phase - c.nodes[j].phase;
+            node_radial_amp[i] += C[i * 16 + j] * Math.cos(phase_diff);
+            node_tangent_amp[i] += C[i * 16 + j] * Math.sin(phase_diff);
+         }
+      }
+
+      const cx_grid = Math.floor((c.pos.x / CONFIG.WIDTH) * N);
+      const cy_grid = Math.floor((c.pos.y / CONFIG.HEIGHT) * N);
+      const radius_wave = Math.floor(N * activeSettings.injectionRadius * 3.0); 
+      const tf = this.time * 12.0;
+      const phase_cos = Math.cos(tf);
+      const phase_sin = Math.sin(tf);
+
+      const intensity = activeSettings.injectionIntensity;
+
+      for (let y = -radius_wave; y <= radius_wave; y++) {
+        for (let x = -radius_wave; x <= radius_wave; x++) {
+          const gx = (cx_grid + x + N) % N;
+          const gy = (cy_grid + y + N) % N;
+          const distSq = x * x + y * y;
+          const weight = Math.exp(-distSq / (radius_wave * radius_wave * 0.4));
+          
+          if (weight > 0.01) {
+            const idx = gx + gy * N;
+            for (let ch = 0; ch < this.numElements; ch++) {
+              let vectorVal = 0.0;
+              if (ch < c.vector.length) {
+                vectorVal = c.vector[ch];
+              } else {
+                if (ch === 3) vectorVal = (c.vector[0] + c.vector[1]) * 0.5;
+                else if (ch === 4) vectorVal = (c.vector[1] + c.vector[2]) * 0.5;
+                else if (ch === 5) vectorVal = (c.vector[0] + c.vector[2]) * 0.5;
+                else if (ch === 6) vectorVal = (c.vector[0] + c.vector[1] + c.vector[2]) * 0.333;
+              }
+              this.fluid.density_prev[ch * 2][idx] += vectorVal * phase_cos * weight * intensity;
+              this.fluid.density_prev[ch * 2 + 1][idx] += vectorVal * phase_sin * weight * intensity;
+            }
+          }
+        }
+      }
+
+      for (let i = 0; i < 16; i++) {
+        const radX = c.nodes[i].x - c.pos.x;
+        const radY = c.nodes[i].y - c.pos.y;
+        const dist = Math.hypot(radX, radY) + 1e-5;
+        const normalX = radX / dist;
+        const normalY = radY / dist;
+        const tangentX = -normalY;
+        const tangentY = normalX;
+
+        let thrustMult = c.isPlayer ? 1500.0 : 85.0;
+        const thrustX = (node_radial_amp[i] * normalX + node_tangent_amp[i] * tangentX) * thrustMult;
+        const thrustY = (node_radial_amp[i] * normalY + node_tangent_amp[i] * tangentY) * thrustMult;
+
+        const pin_gx = Math.floor((c.nodes[i].x / CONFIG.WIDTH) * N);
+        const pin_gy = Math.floor((c.nodes[i].y / CONFIG.HEIGHT) * N);
+
+        for (let y = -2; y <= 2; y++) {
+          for (let x = -2; x <= 2; x++) {
+            const gx = (pin_gx + x + N) % N;
+            const gy = (pin_gy + y + N) % N;
+            const weight = Math.exp(-(x * x + y * y) / 2.0);
+            const idx = gx + gy * N;
+            
+            this.fluid.u_prev[idx] += thrustX * weight;
+            this.fluid.v_prev[idx] += thrustY * weight;
+          }
+        }
+      }
+    }
+
+    // Execute standard physics step for the assigned solver
+    this.fluid.step(dt, pCOM, bCOM, pIntent, bIntent, activeSettings);
 
     for (const c of this.cultivators) {
       if (c.isDead) continue;
@@ -499,7 +506,6 @@ export class PhaseVortexArena {
       c.angle += curl * 0.1 * dt + c.tq * 2.0 * dt;
     }
 
-    // --- УПРУГАЯ СИМУЛЯЦИЯ МЯГКИХ ТЕЛ ---
     for (const c of this.cultivators) {
       if (c.isDead) continue; 
 
@@ -675,8 +681,6 @@ export class PhaseVortexArena {
         if (has_advantage) rps_mult = 0.70; 
         if (has_disadvantage) rps_mult = 1.45; 
 
-        // ИСПРАВЛЕНИЕ САМОВЫПИЛИВАНИЯ: Иммунитет к своим волнам.
-        // Урон от фракталов и диссонанса наносится только если на ноду набегает ВРАЖЕСКОЕ облако плотности.
         const pDens = this.fluid.sample(this.fluid.playerDensity, node.x, node.y);
         const bDens = this.fluid.sample(this.fluid.botDensity, node.x, node.y);
         const enemyDensity = c.team === 0 ? bDens : pDens;

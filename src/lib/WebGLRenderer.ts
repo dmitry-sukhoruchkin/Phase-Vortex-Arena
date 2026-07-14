@@ -62,7 +62,6 @@ export class WebGLFluidRenderer {
       uniform float u_stripeFreq;
       uniform float u_stripeContrast;
 
-      // Ручная билинейная фильтрация для полного исключения аппаратной блочности
       vec4 textureBilinear(sampler2D tex, vec2 localUV, int targetBlock) {
           vec2 texSize = vec2(float(u_gridRes), float(u_gridRes));
           vec2 uv = clamp(localUV, 0.5 / texSize, 1.0 - 0.5 / texSize);
@@ -82,9 +81,8 @@ export class WebGLFluidRenderer {
 
       void main() {
           vec3 color = vec3(0.047, 0.047, 0.047);
-          float tf = u_time * 8.0;
+          float tf = u_time * 12.0; // Match the CPU wave frequency exactly
           
-          // Проекция следящей камеры, следующей за углом слизи (полный аналог F.affine_grid)
           vec2 centered = v_texcoord - 0.5;
           float cos_a = cos(-u_angle);
           float sin_a = sin(-u_angle);
@@ -95,7 +93,6 @@ export class WebGLFluidRenderer {
           
           vec2 camCoord = (rotated * u_zoom) + u_cameraCOM;
           
-          // ОГРАНИЧЕНИЕ ГРАНИЦ: Если выходим за пределы арены, рисуем темный фон и убираем растянутые цветные полосы
           if (camCoord.x < 0.0 || camCoord.x > 1.0 || camCoord.y < 0.0 || camCoord.y > 1.0) {
               gl_FragColor = vec4(color, 1.0);
               return;
@@ -115,8 +112,6 @@ export class WebGLFluidRenderer {
               float tfScale = tf * (1.0 - float(i) * 0.12);
               float wave = re * cos(tfScale) - im * sin(tfScale);
               
-              // В Python используется чистое абсолютное значение волны: R = abs(wave)
-              // Это полностью убирает высокочастотную шахматную решётку и возвращает плавные фронты
               float w = abs(wave) * u_stripeContrast;
               
               color += u_colors[i] * clamp(w, 0.0, 1.0);

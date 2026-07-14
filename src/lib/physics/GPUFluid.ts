@@ -102,6 +102,12 @@ export class GPUFluidSolver {
   private cpuVelocityBuffer!: Float32Array;
   private cpuDensityBuffer!: Float32Array;
 
+  private tempAmp!: Float32Array;
+  private tempLaplacian!: Float32Array;
+
+  private velocitySourcesTex!: WebGLTexture;
+  private densitySourcesTex!: WebGLTexture;
+
   constructor(N: number, numElements: number) {
     this.N = N;
     this.size = N * N;
@@ -129,6 +135,9 @@ export class GPUFluidSolver {
     this.v_prev = new Float32Array(this.size);
     this.density_prev = Array.from({ length: numElements * 2 }, () => new Float32Array(this.size));
     this.density = Array.from({ length: numElements * 2 }, () => new Float32Array(this.size));
+
+    this.tempAmp = new Float32Array(this.size);
+    this.tempLaplacian = new Float32Array(this.size);
 
     this.initGPGPU();
   }
@@ -159,6 +168,20 @@ export class GPUFluidSolver {
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.divBuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.divTexture, 0);
 
+    this.velocitySourcesTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.velocitySourcesTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    this.densitySourcesTex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.densitySourcesTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
     this.quadBuffer = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
@@ -183,12 +206,37 @@ export class GPUFluidSolver {
       uniform sampler2D u_velocity;
       uniform float u_dt;
       uniform vec2 u_texelSize;
+
+      // Manual bilinear interpolation to avoid checkered grid noise
+      vec4 textureBilinear(sampler2D tex, vec2 uv, vec2 texelSize) {
+          vec2 coord = uv / texelSize - 0.5;
+          vec2 i0 = floor(coord);
+          vec2 f = coord - i0;
+          
+          vec2 uv00 = (i0 + 0.5) * texelSize;
+          vec2 uv10 = uv00 + vec2(texelSize.x, 0.0);
+          vec2 uv01 = uv00 + vec2(0.0, texelSize.y);
+          vec2 uv11 = uv00 + texelSize;
+          
+          uv00 = clamp(uv00, 0.5 * texelSize, 1.0 - 0.5 * texelSize);
+          uv10 = clamp(uv10, 0.5 * texelSize, 1.0 - 0.5 * texelSize);
+          uv01 = clamp(uv01, 0.5 * texelSize, 1.0 - 0.5 * texelSize);
+          uv11 = clamp(uv11, 0.5 * texelSize, 1.0 - 0.5 * texelSize);
+          
+          vec4 t00 = texture(tex, uv00);
+          vec4 t10 = texture(tex, uv10);
+          vec4 t01 = texture(tex, uv01);
+          vec4 t11 = texture(tex, uv11);
+          
+          return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+      }
+
       void main() {
           vec2 vel = texture(u_velocity, v_texcoord).xy;
           vec2 offset = vel * u_dt * u_texelSize;
           vec2 targetUV = clamp(v_texcoord - offset, 0.5 * u_texelSize, 1.0 - 0.5 * u_texelSize);
-          vec4 state = texture(u_velocity, targetUV);
-          fragColor = vec4(state.xy * 0.96, state.zw * 0.992); 
+          vec4 state = textureBilinear(u_velocity, targetUV, u_texelSize);
+          fragColor = vec4(state.xy * 0.95, state.zw * 0.99); 
       }
     `;
 
@@ -202,6 +250,34 @@ export class GPUFluidSolver {
       uniform float u_dt;
       uniform vec2 u_texelSize;
       uniform int u_blocks;
+
+      // Block-bounded manual bilinear interpolation to prevent inter-channel bleeding
+      vec4 textureBlockBilinear(sampler2D tex, vec2 localUV, int blockIdx, int numBlocks, vec2 texelSize) {
+          vec2 coord = vec2(localUV.x / texelSize.x, localUV.y / (texelSize.y * float(numBlocks))) - 0.5;
+          vec2 i0 = floor(coord);
+          vec2 f = coord - i0;
+
+          float y0 = clamp((i0.y + 0.5) * texelSize.y * float(numBlocks), 0.5 * texelSize.y * float(numBlocks), 1.0 - 0.5 * texelSize.y * float(numBlocks));
+          float y1 = clamp(y0 + texelSize.y * float(numBlocks), 0.5 * texelSize.y * float(numBlocks), 1.0 - 0.5 * texelSize.y * float(numBlocks));
+
+          vec2 gUV00 = vec2((i0.x + 0.5) * texelSize.x, (y0 + float(blockIdx)) / float(numBlocks));
+          vec2 gUV10 = vec2(gUV00.x + texelSize.x, (y0 + float(blockIdx)) / float(numBlocks));
+          vec2 gUV01 = vec2(gUV00.x, (y1 + float(blockIdx)) / float(numBlocks));
+          vec2 gUV11 = vec2(gUV00.x + texelSize.x, (y1 + float(blockIdx)) / float(numBlocks));
+
+          gUV00.x = clamp(gUV00.x, 0.5 * texelSize.x, 1.0 - 0.5 * texelSize.x);
+          gUV10.x = clamp(gUV10.x, 0.5 * texelSize.x, 1.0 - 0.5 * texelSize.x);
+          gUV01.x = clamp(gUV01.x, 0.5 * texelSize.x, 1.0 - 0.5 * texelSize.x);
+          gUV11.x = clamp(gUV11.x, 0.5 * texelSize.x, 1.0 - 0.5 * texelSize.x);
+
+          vec4 t00 = texture(tex, gUV00);
+          vec4 t10 = texture(tex, gUV10);
+          vec4 t01 = texture(tex, gUV01);
+          vec4 t11 = texture(tex, gUV11);
+
+          return mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+      }
+
       void main() {
           float blockHeight = 1.0 / float(u_blocks);
           int blockIdx = int(v_texcoord.y / blockHeight);
@@ -211,8 +287,8 @@ export class GPUFluidSolver {
           vec2 vel = texture(u_velocity, localUV).xy;
           vec2 offset = vel * u_dt * u_texelSize;
           vec2 targetLocalUV = clamp(localUV - offset, 0.5 * u_texelSize, 1.0 - 0.5 * u_texelSize);
-          vec2 globalUV = vec2(targetLocalUV.x, (targetLocalUV.y + float(blockIdx)) / float(u_blocks));
-          fragColor = texture(u_field, globalUV);
+          
+          fragColor = textureBlockBilinear(u_field, targetLocalUV, blockIdx, u_blocks, u_texelSize) * 0.995;
       }
     `;
 
@@ -223,37 +299,17 @@ export class GPUFluidSolver {
       out vec4 fragColor;
 
       uniform sampler2D u_velocity;
-      uniform vec2 u_playerCOM;
-      uniform vec2 u_botCOM;
-      uniform vec3 u_playerIntent; 
-      uniform vec3 u_botIntent;
+      uniform sampler2D u_velocitySources;
       uniform float u_dt;
 
       void main() {
           vec4 state = texture(u_velocity, v_texcoord);
-          vec2 uv = v_texcoord;
+          vec4 src = texture(u_velocitySources, v_texcoord);
 
-          float distP = length(uv - u_playerCOM);
-          float distB = length(uv - u_botCOM);
+          state.xy += src.xy * u_dt;
 
-          float weightP = exp(-distP * distP / 0.003);
-          float weightB = exp(-distB * distB / 0.003);
-
-          vec2 normalP = normalize(uv - u_playerCOM + 1e-5);
-          vec2 tangentP = vec2(-normalP.y, normalP.x);
-          vec2 forceP = u_playerIntent.xy * 2500.0 + tangentP * u_playerIntent.z * 600.0;
-
-          vec2 normalB = normalize(uv - u_botCOM + 1e-5);
-          vec2 tangentB = vec2(-normalB.y, normalB.x);
-          vec2 forceB = u_botIntent.xy * 1200.0 + tangentB * u_botIntent.z * 300.0;
-
-          state.xy += (forceP * weightP + forceB * weightB) * u_dt;
-
-          float dGenP = exp(-distP * distP / 0.0006) * 4.0;
-          float dGenB = exp(-distB * distB / 0.0006) * 4.0;
-
-          state.z = clamp(state.z + dGenP * u_dt * 15.0, 0.0, 3.0);
-          state.w = clamp(state.w + dGenB * u_dt * 15.0, 0.0, 3.0);
+          state.z = clamp(state.z + src.z * u_dt, 0.0, 3.0);
+          state.w = clamp(state.w + src.w * u_dt, 0.0, 3.0);
 
           fragColor = state;
       }
@@ -266,46 +322,14 @@ export class GPUFluidSolver {
       out vec4 fragColor;
 
       uniform sampler2D u_density;
-      uniform vec2 u_playerCOM;
-      uniform vec2 u_botCOM;
-      uniform vec3 u_playerVector;
-      uniform vec3 u_botVector;
-      uniform float u_time;
+      uniform sampler2D u_densitySources;
       uniform float u_dt;
-      uniform int u_blocks;
-      
-      uniform float u_injectionRadius;
-      uniform float u_injectionIntensity;
 
       void main() {
           vec4 state = texture(u_density, v_texcoord);
+          vec4 src = texture(u_densitySources, v_texcoord);
           
-          float blockHeight = 1.0 / float(u_blocks);
-          int blockIdx = int(v_texcoord.y / blockHeight);
-          float localY = mod(v_texcoord.y, blockHeight) * float(u_blocks);
-          vec2 localUV = vec2(v_texcoord.x, localY);
-
-          float distP = length(localUV - u_playerCOM);
-          float distB = length(localUV - u_botCOM);
-
-          float weightP = exp(-distP * distP / u_injectionRadius);
-          float weightB = exp(-distB * distB / u_injectionRadius);
-
-          int el1 = blockIdx * 2;
-          int el2 = blockIdx * 2 + 1;
-
-          float tf = u_time * 12.0;
-
-          if (el1 < 3) {
-              float waveP = cos(tf * (1.0 - float(el1) * 0.12)) * u_playerVector[el1];
-              float waveB = cos(tf * (1.0 - float(el1) * 0.12)) * u_botVector[el1];
-              state.xy += vec2(waveP * weightP + waveB * weightB) * u_dt * u_injectionIntensity;
-          }
-          if (el2 < 3) {
-              float waveP = cos(tf * (1.0 - float(el2) * 0.12)) * u_playerVector[el2];
-              float waveB = cos(tf * (1.0 - float(el2) * 0.12)) * u_botVector[el2];
-              state.zw += vec2(waveP * weightP + waveB * weightB) * u_dt * u_injectionIntensity;
-          }
+          state += src * u_dt;
 
           fragColor = state;
       }
@@ -348,7 +372,8 @@ export class GPUFluidSolver {
           float p_down  = texture(u_pressure, uv - dy).x;
           float p_up    = texture(u_pressure, uv + dy).x;
           float div     = texture(u_div, uv).x;
-          float p_next  = 0.25 * (p_left + p_right + p_down + p_up - div);
+          // Correct sign for pressure Poisson solver (matches CPU solver and strict fluid physics)
+          float p_next  = 0.25 * (p_left + p_right + p_down + p_up + div);
           fragColor = vec4(p_next, 0.0, 0.0, 1.0);
       }
     `;
@@ -428,6 +453,108 @@ export class GPUFluidSolver {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, N, N * this.blocks, 0, gl.RGBA, gl.FLOAT, densData);
   }
 
+  uploadDensity() {
+    const gl = this.gl;
+    const N = this.N;
+
+    const densData = new Float32Array(N * N * this.blocks * 4);
+    for (let b = 0; b < this.blocks; b++) {
+      const el1 = b * 2;
+      const el2 = b * 2 + 1;
+      const offset = b * N * N * 4;
+      
+      for (let y = 0; y < N; y++) {
+        const canvasY = y;
+        const webglY = N - 1 - y;
+        const canvasOffset = canvasY * N;
+        const webglOffset = webglY * N;
+        
+        for (let x = 0; x < N; x++) {
+          const canvasIdx = x + canvasOffset;
+          const webglIdx = x + webglOffset;
+          
+          if (el1 < this.numElements) {
+            densData[offset + webglIdx * 4] = this.density[el1 * 2][canvasIdx];
+            densData[offset + webglIdx * 4 + 1] = this.density[el1 * 2 + 1][canvasIdx];
+          }
+          if (el2 < this.numElements) {
+            densData[offset + webglIdx * 4 + 2] = this.density[el2 * 2][canvasIdx];
+            densData[offset + webglIdx * 4 + 3] = this.density[el2 * 2 + 1][canvasIdx];
+          }
+        }
+      }
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.densityBuffer.textures[0]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, N, N * this.blocks, 0, gl.RGBA, gl.FLOAT, densData);
+    gl.bindTexture(gl.TEXTURE_2D, this.densityBuffer.textures[1]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, N, N * this.blocks, 0, gl.RGBA, gl.FLOAT, densData);
+  }
+
+  uploadSources(pCOM: [number, number], bCOM: [number, number]) {
+    const gl = this.gl;
+    const N = this.N;
+
+    const velSrcData = new Float32Array(N * N * 4);
+    const px_grid = Math.floor(pCOM[0] * N);
+    const py_grid = Math.floor(pCOM[1] * N);
+    const bx_grid = Math.floor(bCOM[0] * N);
+    const by_grid = Math.floor(bCOM[1] * N);
+
+    const pIdx = px_grid + py_grid * N;
+    const bIdx = bx_grid + by_grid * N;
+
+    for (let y = 0; y < N; y++) {
+      const canvasY = y;
+      const webglY = N - 1 - y;
+      const canvasOffset = canvasY * N;
+      const webglOffset = webglY * N;
+
+      for (let x = 0; x < N; x++) {
+        const canvasIdx = x + canvasOffset;
+        const webglIdx = x + webglOffset;
+
+        velSrcData[webglIdx * 4] = this.u_prev[canvasIdx];
+        velSrcData[webglIdx * 4 + 1] = -this.v_prev[canvasIdx]; 
+        velSrcData[webglIdx * 4 + 2] = (canvasIdx === pIdx) ? 15.0 : 0.0; 
+        velSrcData[webglIdx * 4 + 3] = (canvasIdx === bIdx) ? 15.0 : 0.0; 
+      }
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, this.velocitySourcesTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, N, N, 0, gl.RGBA, gl.FLOAT, velSrcData);
+
+    const densSrcData = new Float32Array(N * N * this.blocks * 4);
+    for (let b = 0; b < this.blocks; b++) {
+      const el1 = b * 2;
+      const el2 = b * 2 + 1;
+      const offset = b * N * N * 4;
+
+      for (let y = 0; y < N; y++) {
+        const canvasY = y;
+        const webglY = N - 1 - y;
+        const canvasOffset = canvasY * N;
+        const webglOffset = webglY * N;
+
+        for (let x = 0; x < N; x++) {
+          const canvasIdx = x + canvasOffset;
+          const webglIdx = x + webglOffset;
+
+          if (el1 < this.numElements) {
+            densSrcData[offset + webglIdx * 4] = this.density_prev[el1 * 2][canvasIdx];
+            densSrcData[offset + webglIdx * 4 + 1] = this.density_prev[el1 * 2 + 1][canvasIdx];
+          }
+          if (el2 < this.numElements) {
+            densSrcData[offset + webglIdx * 4 + 2] = this.density_prev[el2 * 2][canvasIdx];
+            densSrcData[offset + webglIdx * 4 + 3] = this.density_prev[el2 * 2 + 1][canvasIdx];
+          }
+        }
+      }
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, this.densitySourcesTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, N, N * this.blocks, 0, gl.RGBA, gl.FLOAT, densSrcData);
+  }
+
   IX(x: number, y: number): number {
     x = Math.max(0, Math.min(x, this.N - 1));
     y = Math.max(0, Math.min(y, this.N - 1));
@@ -452,21 +579,102 @@ export class GPUFluidSolver {
            s1 * (t0 * field[this.IX(i1, j0)] + t1 * field[this.IX(i1, j1)]);
   }
 
-  step(dt: number, pCOM: [number, number], bCOM: [number, number], pIntent: [number, number, number], bIntent: [number, number, number], pVector: [number, number, number], bVector: [number, number, number], settings?: any) {
+  setBnd(b: number, x: Float32Array) {
+    const N = this.N;
+    for (let i = 1; i < N - 1; i++) {
+      x[this.IX(0, i)] = b === 1 ? -x[this.IX(1, i)] : x[this.IX(1, i)];
+      x[this.IX(N - 1, i)] = b === 1 ? -x[this.IX(N - 2, i)] : x[this.IX(N - 2, i)];
+      x[this.IX(i, 0)] = b === 2 ? -x[this.IX(i, 1)] : x[this.IX(i, 1)];
+      x[this.IX(i, N - 1)] = b === 2 ? -x[this.IX(i, N - 2)] : x[this.IX(i, N - 2)];
+    }
+    x[this.IX(0, 0)] = 0.5 * (x[this.IX(1, 0)] + x[this.IX(0, 1)]);
+    x[this.IX(0, N - 1)] = 0.5 * (x[this.IX(1, N - 1)] + x[this.IX(0, N - 2)]);
+    x[this.IX(N - 1, 0)] = 0.5 * (x[this.IX(N - 2, 0)] + x[this.IX(N - 1, 1)]);
+    x[this.IX(N - 1, N - 1)] = 0.5 * (x[this.IX(N - 2, N - 1)] + x[this.IX(N - 1, N - 2)]);
+  }
+
+  applyPhaseCoupling(dt: number, settings: any) {
+    if (this.numElements < 3) return;
+    const size = this.size;
+    for (let i = 0; i < size; i++) {
+      const r_re = this.density[0][i];
+      const r_im = this.density[1][i];
+      const g_re = this.density[2][i];
+      const g_im = this.density[3][i];
+      const b_re = this.density[4][i];
+      const b_im = this.density[5][i];
+
+      const amp_R = Math.hypot(r_re, r_im) + 1e-8;
+      const amp_G = Math.hypot(g_re, g_im) + 1e-8;
+      const amp_B = Math.hypot(b_re, b_im) + 1e-8;
+
+      const phase_R = Math.atan2(r_im, r_re);
+      const phase_B = Math.atan2(b_im, b_re);
+
+      const phase_diff = phase_R - phase_B;
+      const lock_in_force = amp_G * Math.sin(phase_diff) * settings.couplingStrength * dt;
+
+      const amp_R_new = amp_R * (1.0 + settings.pacStrength * amp_B * Math.cos(phase_B) * dt * 2.0);
+
+      const phase_R_new = phase_R - lock_in_force;
+      const phase_B_new = phase_B + lock_in_force;
+
+      this.density[0][i] = amp_R_new * Math.cos(phase_R_new);
+      this.density[1][i] = amp_R_new * Math.sin(phase_R_new);
+      this.density[4][i] = amp_B * Math.cos(phase_B_new);
+      this.density[5][i] = amp_B * Math.sin(phase_B_new);
+    }
+  }
+
+  sharpenDensity(dt: number, settings: any) {
+    const N = this.N;
+    const tempAmp = this.tempAmp;
+    const tempLap = this.tempLaplacian;
+
+    for (let c = 0; c < this.numElements; c++) {
+      const re = this.density[c * 2];
+      const im = this.density[c * 2 + 1];
+      
+      for (let i = 0; i < this.size; i++) {
+        tempAmp[i] = Math.hypot(re[i], im[i]);
+      }
+
+      tempLap.fill(0);
+
+      for (let y = 1; y < N - 1; y++) {
+        for (let x = 1; x < N - 1; x++) {
+          const idx = this.IX(x, y);
+          tempLap[idx] = tempAmp[this.IX(x - 1, y)] + tempAmp[this.IX(x + 1, y)] +
+                         tempAmp[this.IX(x, y - 1)] + tempAmp[this.IX(x, y + 1)] - 4.0 * tempAmp[idx];
+        }
+      }
+
+      for (let i = 0; i < this.size; i++) {
+        const amp = tempAmp[i];
+        if (amp > 0.12) {
+          const sharpening = (amp * (amp - 0.3) * (1.0 - amp) + 0.10 * tempLap[i]) * settings.cahnHilliardSharpen * dt;
+          const origPhase = Math.atan2(im[i], re[i]);
+          const newAmp = Math.max(0.0, Math.min(2.5, amp + sharpening));
+          re[i] = newAmp * Math.cos(origPhase);
+          im[i] = newAmp * Math.sin(origPhase);
+        }
+      }
+    }
+  }
+
+  step(dt: number, pCOM: [number, number], bCOM: [number, number], pIntent: [number, number, number], bIntent: [number, number, number], settings?: any) {
     const gl = this.gl;
     const N = this.N;
     const activeSettings = settings || { hbar: 120.0, decay: 0.9992, injectionRadius: 0.05, injectionIntensity: 150.0, cahnHilliardSharpen: 4.0, couplingStrength: 25.0, pacStrength: 6.5 };
 
+    this.uploadSources(pCOM, bCOM);
+
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-    let loc = gl.getAttribLocation(this.advectVelocityProgram, "a_position");
+    let loc = gl.getAttribLocation(this.injectSourcesProgram, "a_position");
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
 
     gl.useProgram(this.injectSourcesProgram);
-    gl.uniform2f(gl.getUniformLocation(this.injectSourcesProgram, "u_playerCOM"), pCOM[0], pCOM[1]);
-    gl.uniform2f(gl.getUniformLocation(this.injectSourcesProgram, "u_botCOM"), bCOM[0], bCOM[1]);
-    gl.uniform3f(gl.getUniformLocation(this.injectSourcesProgram, "u_playerIntent"), pIntent[0], pIntent[1], pIntent[2]);
-    gl.uniform3f(gl.getUniformLocation(this.injectSourcesProgram, "u_botIntent"), bIntent[0], bIntent[1], bIntent[2]);
     gl.uniform1f(gl.getUniformLocation(this.injectSourcesProgram, "u_dt"), dt);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.velocityBuffer.writeFBO);
@@ -474,27 +682,29 @@ export class GPUFluidSolver {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.velocityBuffer.readTex);
     gl.uniform1i(gl.getUniformLocation(this.injectSourcesProgram, "u_velocity"), 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.velocitySourcesTex);
+    gl.uniform1i(gl.getUniformLocation(this.injectSourcesProgram, "u_velocitySources"), 1);
+
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     this.velocityBuffer.swap();
 
-    // ИСПРАВЛЕНИЕ: Берем интенсивность напрямую из настроек (как было изначально)
     gl.useProgram(this.injectElementWavesProgram);
-    gl.uniform2f(gl.getUniformLocation(this.injectElementWavesProgram, "u_playerCOM"), pCOM[0], pCOM[1]);
-    gl.uniform2f(gl.getUniformLocation(this.injectElementWavesProgram, "u_botCOM"), bCOM[0], bCOM[1]);
-    gl.uniform3f(gl.getUniformLocation(this.injectElementWavesProgram, "u_playerVector"), pVector[0], pVector[1], pVector[2]);
-    gl.uniform3f(gl.getUniformLocation(this.injectElementWavesProgram, "u_botVector"), bVector[0], bVector[1], bVector[2]);
-    gl.uniform1f(gl.getUniformLocation(this.injectElementWavesProgram, "u_time"), this.time);
     gl.uniform1f(gl.getUniformLocation(this.injectElementWavesProgram, "u_dt"), dt);
     gl.uniform1i(gl.getUniformLocation(this.injectElementWavesProgram, "u_blocks"), this.blocks);
-    
-    gl.uniform1f(gl.getUniformLocation(this.injectElementWavesProgram, "u_injectionRadius"), activeSettings.injectionRadius);
-    gl.uniform1f(gl.getUniformLocation(this.injectElementWavesProgram, "u_injectionIntensity"), activeSettings.injectionIntensity);
+    gl.uniform1i(gl.getUniformLocation(this.injectElementWavesProgram, "u_numElements"), this.numElements);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.densityBuffer.writeFBO);
     gl.viewport(0, 0, N, N * this.blocks);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.densityBuffer.readTex);
     gl.uniform1i(gl.getUniformLocation(this.injectElementWavesProgram, "u_density"), 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.densitySourcesTex);
+    gl.uniform1i(gl.getUniformLocation(this.injectElementWavesProgram, "u_densitySources"), 1);
+
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     this.densityBuffer.swap();
 
@@ -580,6 +790,17 @@ export class GPUFluidSolver {
 
     this.time += dt;
     this.downloadData();
+
+    this.applyPhaseCoupling(dt, activeSettings);
+    this.sharpenDensity(dt, activeSettings);
+
+    for (let c = 0; c < this.numElements * 2; c++) {
+      this.setBnd(0, this.density[c]);
+    }
+    this.setBnd(0, this.playerDensity);
+    this.setBnd(0, this.botDensity);
+
+    this.uploadDensity();
   }
 
   downloadData() {
@@ -589,11 +810,22 @@ export class GPUFluidSolver {
     const latestVelocityFBO = this.velocityBuffer.framebuffers[1 - this.velocityBuffer.writeIndex];
     gl.bindFramebuffer(gl.FRAMEBUFFER, latestVelocityFBO);
     gl.readPixels(0, 0, N, N, gl.RGBA, gl.FLOAT, this.cpuVelocityBuffer);
-    for (let i = 0; i < N * N; i++) {
-      this.u[i] = this.cpuVelocityBuffer[i * 4];
-      this.v[i] = this.cpuVelocityBuffer[i * 4 + 1];
-      this.playerDensity[i] = this.cpuVelocityBuffer[i * 4 + 2];
-      this.botDensity[i] = this.cpuVelocityBuffer[i * 4 + 3];
+    
+    for (let y = 0; y < N; y++) {
+      const canvasY = y;
+      const webglY = N - 1 - y;
+      const canvasOffset = canvasY * N;
+      const webglOffset = webglY * N;
+      
+      for (let x = 0; x < N; x++) {
+        const canvasIdx = x + canvasOffset;
+        const webglIdx = x + webglOffset;
+        
+        this.u[canvasIdx] = this.cpuVelocityBuffer[webglIdx * 4];
+        this.v[canvasIdx] = -this.cpuVelocityBuffer[webglIdx * 4 + 1]; 
+        this.playerDensity[canvasIdx] = this.cpuVelocityBuffer[webglIdx * 4 + 2];
+        this.botDensity[canvasIdx] = this.cpuVelocityBuffer[webglIdx * 4 + 3];
+      }
     }
 
     const latestDensityFBO = this.densityBuffer.framebuffers[1 - this.densityBuffer.writeIndex];
@@ -604,14 +836,25 @@ export class GPUFluidSolver {
       const el1 = b * 2;
       const el2 = b * 2 + 1;
       const offset = b * N * N * 4;
-      for (let i = 0; i < N * N; i++) {
-        if (el1 < this.numElements) {
-          this.density[el1 * 2][i] = this.cpuDensityBuffer[offset + i * 4];
-          this.density[el1 * 2 + 1][i] = this.cpuDensityBuffer[offset + i * 4 + 1];
-        }
-        if (el2 < this.numElements) {
-          this.density[el2 * 2][i] = this.cpuDensityBuffer[offset + i * 4 + 2];
-          this.density[el2 * 2 + 1][i] = this.cpuDensityBuffer[offset + i * 4 + 3];
+      
+      for (let y = 0; y < N; y++) {
+        const canvasY = y;
+        const webglY = N - 1 - y;
+        const canvasOffset = canvasY * N;
+        const webglOffset = webglY * N;
+        
+        for (let x = 0; x < N; x++) {
+          const canvasIdx = x + canvasOffset;
+          const webglIdx = x + webglOffset;
+          
+          if (el1 < this.numElements) {
+            this.density[el1 * 2][canvasIdx] = this.cpuDensityBuffer[offset + webglIdx * 4];
+            this.density[el1 * 2 + 1][canvasIdx] = this.cpuDensityBuffer[offset + webglIdx * 4 + 1];
+          }
+          if (el2 < this.numElements) {
+            this.density[el2 * 2][canvasIdx] = this.cpuDensityBuffer[offset + webglIdx * 4 + 2];
+            this.density[el2 * 2 + 1][canvasIdx] = this.cpuDensityBuffer[offset + webglIdx * 4 + 3];
+          }
         }
       }
     }
