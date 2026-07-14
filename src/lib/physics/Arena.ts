@@ -1,3 +1,4 @@
+// src/lib/physics/Arena.ts
 import { FluidSolver } from './Fluid';
 import { GPUFluidSolver } from './GPUFluid';
 import { CONFIG, SEMANTIC_PILLS_DB, COORDS_16_X, COORDS_16_Y, PillConfig } from '../config';
@@ -52,8 +53,15 @@ export class Cultivator {
 
   style: string = "Balanced Triad";
   energyAbsorbed: number = 0;
+  stars: number = 3;
+  isDead: boolean = false;
 
-  constructor(id: string, isPlayer: boolean, x: number, y: number, pill: PillConfig) {
+  // Аналитика ИИ и послематчевая статистика
+  damageDealt: number = 0;
+  damageTaken: number = 0;
+  aiLog: string = "Analyzing battlefield...";
+
+  constructor(id: string, isPlayer: boolean, x: number, y: number, pill: PillConfig, stars: number = 3) {
     this.id = id;
     this.isPlayer = isPlayer;
     this.pillName = pill.name;
@@ -66,8 +74,8 @@ export class Cultivator {
     this.isYin = this.vector[2] > this.vector[0] && this.vector[2] > this.vector[1];
     this.isSlag = false;
     this.isPureMastery = true;
+    this.stars = stars;
 
-    // Назначаем AI-стиль бота на основе выбранного ядра пилюли
     if (this.pillName.includes("Yang") || this.pillName.includes("Fire")) {
       this.style = Math.random() < 0.5 ? "Aggressive Yang" : "Speed Yang";
     } else if (this.pillName.includes("Yin") || this.pillName.includes("Water")) {
@@ -119,7 +127,7 @@ export class PhaseVortexArena {
   time: number = 0;
   numElements: number = 3;
 
-  constructor(p1Config: PillConfig, p2Config: PillConfig, teamSize: number = 1, mode: string = 'PvsB', gridRes: number = 70, numElements: number = 3, gpuEnabled: boolean = true) {
+  constructor(p1Config: PillConfig, p2Config: PillConfig, teamSize: number = 1, mode: string = 'PvsB', gridRes: number = 70, numElements: number = 3, gpuEnabled: boolean = true, playerStars: number[] = [], enemyStars: number[] = []) {
     this.numElements = numElements;
     
     if (gpuEnabled) {
@@ -137,12 +145,14 @@ export class PhaseVortexArena {
     
     for(let i=0; i<teamSize; i++) {
       const isPlayer = (mode === 'PvsB' && i === 0);
-      const c = new Cultivator('p'+i, isPlayer, CONFIG.WIDTH * 0.3, CONFIG.HEIGHT * (0.5 + (i - (teamSize-1)/2)*0.15), p1Config);
+      const pStars = playerStars[i] !== undefined ? playerStars[i] : (isPlayer ? 0 : 3);
+      const c = new Cultivator('p'+i, isPlayer, CONFIG.WIDTH * 0.3, CONFIG.HEIGHT * (0.5 + (i - (teamSize-1)/2)*0.15), p1Config, pStars);
       c.team = 0;
       this.cultivators.push(c);
     }
     for(let i=0; i<teamSize; i++) {
-      const c = new Cultivator('b'+i, false, CONFIG.WIDTH * 0.7, CONFIG.HEIGHT * (0.5 + (i - (teamSize-1)/2)*0.15), p2Config);
+      const bStars = enemyStars[i] !== undefined ? enemyStars[i] : 3;
+      const c = new Cultivator('b'+i, false, CONFIG.WIDTH * 0.7, CONFIG.HEIGHT * (0.5 + (i - (teamSize-1)/2)*0.15), p2Config, bStars);
       c.team = 1;
       this.cultivators.push(c);
     }
@@ -183,13 +193,36 @@ export class PhaseVortexArena {
     this.time += dt;
     const activeSettings = settings || { hbar: 120.0, decay: 0.9992, injectionRadius: 0.05, injectionIntensity: 150.0, cahnHilliardSharpen: 4.0, couplingStrength: 25.0, pacStrength: 6.5, springStiffness: 200.0, tensionTear: 2.0 };
 
-    // 1. Обработка ИИ ботов (эмуляция контроллера со стилями из Python-сборок)
+    // --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: ПЕРЕРАСЧЕТ ЦЕНТРА МАСС ПЕРЕД ШАГОМ ИИ ---
     for (const c of this.cultivators) {
-      if (!c.isPlayer) {
-        let opp = this.cultivators.find(o => o.team !== c.team) || c;
+      if (c.integrity < 0.15) {
+         c.isDead = true;
+         c.aiLog = "DEFEATED";
+         continue; 
+      }
+      let sumX = 0;
+      let sumY = 0;
+      for (const node of c.nodes) {
+         sumX += node.x;
+         sumY += node.y;
+      }
+      c.pos.x = sumX / 16;
+      c.pos.y = sumY / 16;
+    }
+
+    // 1. Process AI bots (Auto-battler logic based on stars)
+    for (const c of this.cultivators) {
+      if (c.isDead) continue;
+      if (c.stars === 0) {
+        c.aiLog = "MANUAL CONTROL MODE";
+        continue; 
+      }
+      
+      if (!c.isPlayer || c.stars > 0) { 
+        let opp = this.cultivators.find(o => o.team !== c.team && !o.isDead) || c;
         let distOpp = Infinity;
         for (const o of this.cultivators) {
-          if (o.team !== c.team) {
+          if (o.team !== c.team && !o.isDead) {
             const d = Math.hypot(c.pos.x - o.pos.x, c.pos.y - o.pos.y);
             if (d < distOpp) { distOpp = d; opp = o; }
           }
@@ -200,7 +233,17 @@ export class PhaseVortexArena {
         const dir_x = dx / dist;
         const dir_y = dy / dist;
 
-        const difficulty_mult = 1.0;
+        const difficulty_mult = c.stars / 3.0; 
+        
+        if (c.stars === 1) {
+          c.vx = dir_x * 0.4;
+          c.vy = dir_y * 0.4;
+          c.tq = 0.0;
+          c.freqVal = 0.0;
+          c.spatialVal = 0.0;
+          c.aiLog = `TGT: ${opp.pillName} | DIST: ${dist.toFixed(0)}px | Focus: 1-Star (Move-To)`;
+          continue;
+        }
 
         if (c.style === "Aggressive Yang") {
           c.vx = dir_x * 0.9 * difficulty_mult;
@@ -271,19 +314,20 @@ export class PhaseVortexArena {
           c.freqVal = 0.0;
           c.spatialVal = 0.0;
         }
+
+        c.aiLog = `STYLE: ${c.style} | TGT: ${opp.pillName} | DIST: ${dist.toFixed(0)}px | FORCE: [${c.vx.toFixed(1)}, ${c.vy.toFixed(1)}]`;
       }
     }
 
-    // 2. Оценка когнитивной синхронизации и режима работы лазеров (Связь K и пучка)
     for (const c of this.cultivators) {
-      if (c.isPlayer) {
+      if (c.isDead) continue;
+      if (c.isPlayer && c.stars === 0) {
         const target_f = c.vector[0] * 1.0 + c.vector[2] * (-1.0);
         const focusSimilarity = Math.max(0.01, 1.0 - Math.abs(c.freqVal - target_f) / 2.0);
         
         c.KActive = c.K + focusSimilarity * 48.0;
         c.stabilizationFactor = focusSimilarity;
 
-        // Генерация пучка волновой синхронизации (размытие фаз соперника)
         if (focusSimilarity > 0.65 && c.freqVal > 0.3) {
           const beam_multiplier = c.isPureMastery ? 2.0 : 1.0;
           c.beamActive = true;
@@ -292,7 +336,7 @@ export class PhaseVortexArena {
           let closest_opp: Cultivator | null = null;
           let min_dist = Infinity;
           for (const other of this.cultivators) {
-            if (other.team !== c.team) {
+            if (other.team !== c.team && !other.isDead) {
               const d = Math.hypot(c.pos.x - other.pos.x, c.pos.y - other.pos.y);
               if (d < min_dist) {
                 min_dist = d;
@@ -321,10 +365,11 @@ export class PhaseVortexArena {
           c.assistProfile = "Mesh Assist";
         }
       } else {
-        // Симметричный расчёт стабилизации для ботов
         const target_f = c.vector[0] * 1.0 + c.vector[2] * (-1.0);
         const focusSimilarity = Math.max(0.01, 1.0 - Math.abs(c.freqVal - target_f) / 2.0);
-        c.KActive = c.K + 25.0 + focusSimilarity * 25.0;
+        c.KActive = c.K + (c.stars * 8.0) + focusSimilarity * (c.stars * 8.0);
+        if (c.stars === 5) c.KActive = 100.0; 
+
         c.stabilizationFactor = 0.5 + focusSimilarity * 0.2;
         c.beamActive = false;
         c.beamIntensity = 0.0;
@@ -333,15 +378,33 @@ export class PhaseVortexArena {
     }
 
     const pCOM: [number, number] = [this.cultivators[0].pos.x / 800.0, this.cultivators[0].pos.y / 800.0];
-    const bCOM: [number, number] = [this.cultivators[1].pos.x / 800.0, this.cultivators[1].pos.y / 800.0];
-    const pIntent: [number, number, number] = [this.cultivators[0].vx, this.cultivators[0].vy, this.cultivators[0].tq];
-    const bIntent: [number, number, number] = [this.cultivators[1].vx, this.cultivators[1].vy, this.cultivators[1].tq];
+    const bCOM: [number, number] = [this.cultivators[1] ? this.cultivators[1].pos.x / 800.0 : 0.7, this.cultivators[1] ? this.cultivators[1].pos.y / 800.0 : 0.5];
+
+    // Вращение векторов направления в мировое пространство (для GPU и CPU)
+    const forwardP = -this.cultivators[0].vy;
+    const strafeP = this.cultivators[0].vx;
+    const pWorldVx = -Math.sin(this.cultivators[0].angle) * forwardP + Math.cos(this.cultivators[0].angle) * strafeP;
+    const pWorldVy = -Math.cos(this.cultivators[0].angle) * forwardP - Math.sin(this.cultivators[0].angle) * strafeP;
+
+    const forwardB = this.cultivators[1] ? -this.cultivators[1].vy : 0;
+    const strafeB = this.cultivators[1] ? this.cultivators[1].vx : 0;
+    const bWorldVx = this.cultivators[1] ? -Math.sin(this.cultivators[1].angle) * forwardB + Math.cos(this.cultivators[1].angle) * strafeB : 0;
+    const bWorldVy = this.cultivators[1] ? -Math.cos(this.cultivators[1].angle) * forwardB - Math.sin(this.cultivators[1].angle) * strafeB : 0;
+
+    const pIntent: [number, number, number] = [pWorldVx, pWorldVy, this.cultivators[0].tq];
+    const bIntent: [number, number, number] = [bWorldVx, bWorldVy, this.cultivators[1] ? this.cultivators[1].tq : 0];
+
+    // Мертвые сущности не должны генерировать волны на GPU
+    const pVecFiltered = this.cultivators[0].isDead ? [0,0,0] as [number, number, number] : this.cultivators[0].vector;
+    const bVecFiltered = (this.cultivators[1] && !this.cultivators[1].isDead) ? this.cultivators[1].vector : [0,0,0] as [number, number, number];
 
     if (this.fluid instanceof GPUFluidSolver) {
-       this.fluid.step(dt, pCOM, bCOM, pIntent, bIntent, this.cultivators[0].vector, this.cultivators[1].vector, activeSettings);
+       this.fluid.step(dt, pCOM, bCOM, pIntent, bIntent, pVecFiltered, bVecFiltered, activeSettings);
     } else {
        const N = this.fluid.N;
        for (const c of this.cultivators) {
+          if (c.isDead) continue; // Мертвые не инжектят волны на CPU
+
           const forward = -c.vy;
           const strafe = c.vx;
           const worldVx = -Math.sin(c.angle) * forward + Math.cos(c.angle) * strafe;
@@ -366,7 +429,6 @@ export class PhaseVortexArena {
              }
           }
 
-          // ГЕНЕРАЦИЯ ШИРОКИХ ЭЛЕМЕНТНЫХ ВОЛН НА CPU ПРИ ФОЛБЭКЕ (Точное соответствие интенсивности 30.0 из Python)
           const cx_grid = Math.floor((c.pos.x / CONFIG.WIDTH) * N);
           const cy_grid = Math.floor((c.pos.y / CONFIG.HEIGHT) * N);
           const radius_wave = Math.floor(N * activeSettings.injectionRadius * 3.0); 
@@ -374,7 +436,7 @@ export class PhaseVortexArena {
           const phase_cos = Math.cos(tf);
           const phase_sin = Math.sin(tf);
 
-          const intensity = 30.0;
+          const intensity = activeSettings.injectionIntensity;
 
           for (let y = -radius_wave; y <= radius_wave; y++) {
             for (let x = -radius_wave; x <= radius_wave; x++) {
@@ -426,36 +488,8 @@ export class PhaseVortexArena {
        this.fluid.step(dt, pCOM, bCOM, pIntent, bIntent, activeSettings);
     }
 
-    const N = this.fluid.N;
-    let sumXP = 0, sumYP = 0, totalP = 0;
-    let sumXB = 0, sumYB = 0, totalB = 0;
-
-    for (let y = 0; y < N; y++) {
-      for (let x = 0; x < N; x++) {
-         const idx = x + y * N;
-         const pDens = this.fluid.playerDensity[idx];
-         const bDens = this.fluid.botDensity[idx];
-
-         sumXP += x * pDens;
-         sumYP += y * pDens;
-         totalP += pDens;
-
-         sumXB += x * bDens;
-         sumYB += y * bDens;
-         totalB += bDens;
-      }
-    }
-
-    if (totalP > 0.01) {
-       this.cultivators[0].pos.x = (sumXP / totalP) * (800.0 / N);
-       this.cultivators[0].pos.y = (sumYP / totalP) * (800.0 / N);
-    }
-    if (totalB > 0.01) {
-       this.cultivators[1].pos.x = (sumXB / totalB) * (800.0 / N);
-       this.cultivators[1].pos.y = (sumYB / totalB) * (800.0 / N);
-    }
-
     for (const c of this.cultivators) {
+      if (c.isDead) continue;
       const u_right = this.fluid.sample(this.fluid.u, c.pos.x + 15, c.pos.y);
       const u_left  = this.fluid.sample(this.fluid.u, c.pos.x - 15, c.pos.y);
       const v_up    = this.fluid.sample(this.fluid.v, c.pos.x, c.pos.y + 15);
@@ -467,6 +501,8 @@ export class PhaseVortexArena {
 
     // --- УПРУГАЯ СИМУЛЯЦИЯ МЯГКИХ ТЕЛ ---
     for (const c of this.cultivators) {
+      if (c.isDead) continue; 
+
       const cos_p = Math.cos(c.angle);
       const sin_p = Math.sin(c.angle);
       const base_scale = 1.25;
@@ -499,7 +535,12 @@ export class PhaseVortexArena {
         const d_curr = Math.hypot(dx_spring, dy_spring) + 1e-5;
 
         const d_rest = Math.hypot(ideal_x[idx_J] - ideal_x[idx_I], ideal_y[idx_J] - ideal_y[idx_I]) + 1e-5;
-        const strain = d_curr / d_rest;
+        
+        const d_rest_tear = Math.hypot(
+          (c.nodes[idx_J].baseX - c.nodes[idx_I].baseX) * 1.25 * 1.5,
+          (c.nodes[idx_J].baseY - c.nodes[idx_I].baseY) * 1.25 * 1.5
+        ) + 1e-5;
+        const strain = d_curr / d_rest_tear;
         
         const T_tear = c.spatialVal >= 0 ? (2.0 + c.spatialVal * 98.0) : (2.0 + (c.spatialVal + 1.0) * 1.5) * (activeSettings.tensionTear / 2.0);
 
@@ -525,8 +566,7 @@ export class PhaseVortexArena {
       let cosSum = 0, sinSum = 0;
       let dissonanceSum = 0;
 
-      // Получаем противника для оценки противовеса RPS
-      const opponent = this.cultivators.find(o => o.team !== c.team) || c;
+      const opponent = this.cultivators.find(o => o.team !== c.team && !o.isDead) || c;
 
       for (let i = 0; i < 16; i++) {
         const node = c.nodes[i];
@@ -570,7 +610,6 @@ export class PhaseVortexArena {
         const similarity = (ampR / norm) * node.vector[0] + (ampG / norm) * node.vector[1] + (ampB / norm) * node.vector[2];
         const dissonance = Math.max(0, Math.min(1.0, 1.0 - similarity));
 
-        // ВЫЧИСЛЕНИЕ ПРОСТРАНСТВЕННОГО ГРАДИЕНТА СТОЛКНОВЕНИЯ ВОЛН (\nabla W_RGB)
         const tf = this.time * 12.0;
         const R_wave = r_re * Math.cos(tf) - r_im * Math.sin(tf);
         const G_wave = g_re * Math.cos(tf * 0.5) - g_im * Math.sin(tf * 0.5);
@@ -610,13 +649,12 @@ export class PhaseVortexArena {
 
         let proximity_damage = 0.0;
         for (const other of this.cultivators) {
-          if (other !== c) {
+          if (other !== c && !other.isDead) {
             const d_opp = Math.hypot(c.pos.x - other.pos.x, c.pos.y - other.pos.y);
             proximity_damage += Math.max(0, (220.0 - d_opp) / 220.0) * 1.8;
           }
         }
 
-        // Проверка RPS-превосходства элементов узла над ядром противника (из Python-конфига)
         let rps_mult = 1.0;
         let maxIdx = 0;
         if (node.vector[1] > node.vector[maxIdx]) maxIdx = 1;
@@ -634,13 +672,27 @@ export class PhaseVortexArena {
                                  (maxIdx === 2 && opp_core === 1) || 
                                  (maxIdx === 0 && opp_core === 2);
                                  
-        if (has_advantage) rps_mult = 0.70; // Сниженный урон (RPS_DISADVANTAGE_MULTIPLIER)
-        if (has_disadvantage) rps_mult = 1.45; // Увеличенный урон (RPS_ADVANTAGE_MULTIPLIER)
+        if (has_advantage) rps_mult = 0.70; 
+        if (has_disadvantage) rps_mult = 1.45; 
 
-        const disruption_force = (dissonance * localM * 4.0 + clash * 38.0 + proximity_damage) * rps_mult;
+        // ИСПРАВЛЕНИЕ САМОВЫПИЛИВАНИЯ: Иммунитет к своим волнам.
+        // Урон от фракталов и диссонанса наносится только если на ноду набегает ВРАЖЕСКОЕ облако плотности.
+        const pDens = this.fluid.sample(this.fluid.playerDensity, node.x, node.y);
+        const bDens = this.fluid.sample(this.fluid.botDensity, node.x, node.y);
+        const enemyDensity = c.team === 0 ? bDens : pDens;
+
+        const effectiveDissonance = dissonance * Math.min(1.0, enemyDensity);
+        const effectiveClash = clash * Math.min(1.0, enemyDensity);
+
+        const disruption_force = (effectiveDissonance * localM * 4.0 + effectiveClash * 38.0 + proximity_damage) * rps_mult;
+        
+        c.damageTaken += disruption_force * dt;
+        if (opponent && opponent !== c) {
+          opponent.damageDealt += disruption_force * dt;
+        }
+
         const jitter_force = Math.min(14.0, (disruption_force * (100.0 / (c.K + 1e-5)) * 0.35) * (1.0 - c.stabilizationFactor * 0.70));
 
-        // Режим поглощения вибраций (Parry / Поглощение для Инь щита)
         let is_absorbing = false;
         if ((c.isYin || !c.isYang) && !c.isSlag) {
           if (c.spatialVal < -0.3) {
@@ -664,12 +716,11 @@ export class PhaseVortexArena {
         const coupling = Math.sin(nextNode.phase - node.phase) + Math.sin(prevNode.phase - node.phase);
         const K = Math.min(35.0, c.KActive);
 
-        const scramble_rate = (dissonance * localM * 1.5 + (16 - activeCount) * 0.15 + clash * 6.5) * rps_mult;
+        const scramble_rate = (effectiveDissonance * localM * 1.5 + (16 - activeCount) * 0.15 + effectiveClash * 6.5) * rps_mult;
         const phase_noise = (Math.random() * 2.0 - 1.0) * scramble_rate;
 
         node.phase += (14.0 * 2 * Math.PI * dt) + K * 0.5 * coupling * dt + phase_noise * dt;
 
-        // Влияние закрутки (torque) и перемещения на смещение фаз Курамото
         if (!c.assistModeActive) {
           const tq_drift = c.tq * 0.20 * dt; 
           node.phase += tq_drift * (i / 16.0);
@@ -686,7 +737,6 @@ export class PhaseVortexArena {
         sinSum += Math.sin(node.phase);
         dissonanceSum += dissonance;
 
-        // Физическое приращение скорости
         const radX = node.x - c.pos.x;
         const radY = node.y - c.pos.y;
         const dist = Math.hypot(radX, radY) + 1e-5;
@@ -714,7 +764,6 @@ export class PhaseVortexArena {
         node.y = Math.max(30.0, Math.min(770.0, node.y));
       }
 
-      // Position-Based Dynamics (PBD) защита от дрейфа при разрыве пружин
       for (let i = 0; i < 16; i++) {
         const node = c.nodes[i];
         const idealX = c.pos.x + (node.baseX * cos_p + node.baseY * sin_p) * scale * 1.5;

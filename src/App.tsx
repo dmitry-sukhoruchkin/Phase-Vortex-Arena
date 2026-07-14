@@ -1,45 +1,71 @@
+// src/App.tsx
 import React, { useEffect, useRef, useState } from 'react';
 import { PhaseVortexArena, Cultivator } from './lib/physics/Arena';
 import { WebGLFluidRenderer } from './lib/WebGLRenderer';
-import { CONFIG, SEMANTIC_PILLS_DB, PillConfig } from './lib/config';
+import { CONFIG, SEMANTIC_PILLS_DB } from './lib/config';
 import { TouchControls } from './lib/TouchControls';
 import { neuroService } from './lib/NeuroService';
 import { multiplayerService } from './lib/MultiplayerService';
 import { audioEngine } from './lib/AudioEngine';
+import { CampaignManager } from './lib/campaign';
+
+import { CampaignHub } from './components/CampaignHub';
+import { SandboxMenu } from './components/SandboxMenu';
+import { PostMatchHUD, CultivatorStats } from './components/PostMatchHUD';
+import { ArenaHUD } from './components/ArenaHUD';
 
 export default function App() {
-  const [gameState, setGameState] = useState<'MENU' | 'ARENA'>('MENU');
-  const [arena, setArena] = useState<PhaseVortexArena | null>(null);
+  const [gameState, setGameState] = useState<'MENU' | 'SANDBOX_MENU' | 'ARENA' | 'CAMPAIGN_HUB' | 'POST_MATCH'>('MENU');
   
-  const [p1Pill, setP1Pill] = useState<string>("Pure Yang Core");
-  const [p2Pill, setP2Pill] = useState<string>("Deep Yin Core");
+  // --- STATE: PERSISTENT SANDBOX SETTINGS ---
+  const [sandboxConfig, setSandboxConfig] = useState({
+     p1Pill: "Pure Yang Core",
+     p2Pill: "Deep Yin Core",
+     mode: "PvsB" as "PvsB" | "BvsB" | "PvsP",
+     teamSize: 1,
+     numElements: 3,
+     gridRes: 80,
+     gpuEnabled: true,
+     p1CustomVec: [0.577, 0.577, 0.577] as [number, number, number],
+     p2CustomVec: [0.577, 0.577, 0.577] as [number, number, number],
+     p1Stars: 0, // По умолчанию 0 - управляем сами
+     p2Stars: 3
+  });
+
+  // --- STATE: CAMPAIGN PROGRESSION ---
+  const [campaignIndex, setCampaignIndex] = useState<number>(-1);
+  const [maxRealmReached, setMaxRealmReached] = useState<number>(-1); 
+  const [essence, setEssence] = useState<number>(0);
+  const [campaignGpu, setCampaignGpu] = useState<boolean>(true);
+  const [realmWon, setRealmWon] = useState<boolean>(false);
+  
+  const [upgrades, setUpgrades] = useState({
+    power: 0,   
+    defense: 0, 
+    focus: 0    
+  });
+
+  // --- ARENA VARIABLES ---
+  const [arena, setArena] = useState<PhaseVortexArena | null>(null);
   const [mode, setMode] = useState<"PvsB" | "BvsB" | "PvsP">("PvsB");
-  const [teamSize, setTeamSize] = useState<number>(1);
   const [numElements, setNumElements] = useState<number>(3);
   const [gridRes, setGridRes] = useState<number>(80);
   const [useWebGL, setUseWebGL] = useState<boolean>(true);
-  const [gpuEnabled, setGpuEnabled] = useState<boolean>(true);
   
-  const [settings, setSettings] = useState({
-     hbar: 120.0,
-     decay: 0.9992,
-     injectionRadius: 0.05,
-     injectionIntensity: 150.0,
-     cahnHilliardSharpen: 4.0,
-     couplingStrength: 25.0,
-     pacStrength: 6.5,
-     stripeFreq: 22.0,
-     stripeContrast: 1.5,
-     springStiffness: 200.0,
-     tensionTear: 2.0
-  });
+  // Режим камеры
+  const [cameraMode, setCameraMode] = useState<'CENTERED' | 'FIXED'>('CENTERED');
 
-  useEffect(() => {
-    webglRendererRef.current = null;
-  }, [gridRes, numElements, useWebGL, gameState]);
+  const DEFAULT_SETTINGS = {
+     hbar: 120.0, decay: 0.9992, injectionRadius: 0.05, injectionIntensity: 150.0,
+     cahnHilliardSharpen: 4.0, couplingStrength: 25.0, pacStrength: 6.5,
+     stripeFreq: 22.0, stripeContrast: 1.5, springStiffness: 200.0, tensionTear: 2.0,
+     timeScale: 0.20 // Медленная физика по умолчанию, чтобы всё успеть рассмотреть
+  };
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
-  const [p1CustomVec, setP1CustomVec] = useState<[number, number, number]>([0.577, 0.577, 0.577]);
-  const [p2CustomVec, setP2CustomVec] = useState<[number, number, number]>([0.577, 0.577, 0.577]);
+  // Стейты послематчевого дашборда
+  const [matchResult, setMatchResult] = useState<'VICTORY' | 'DEFEAT' | null>(null);
+  const [endMatchStats, setEndMatchStats] = useState<CultivatorStats[]>([]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const webglCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -56,31 +82,24 @@ export default function App() {
   const [peerId, setPeerId] = useState('');
   const [p2pConnected, setP2pConnected] = useState(false);
   const peerInputRef = useRef<{ vx: number, vy: number, tq: number, freq: number, spatial: number } | null>(null);
-  const neuroInputRef = useRef<{ vx: number, vy: number, tq: number, freq: number, spatial: number } | null>(null);
+
+  const keys = useRef<{ [key: string]: boolean }>({});
+
+  useEffect(() => {
+    webglRendererRef.current = null;
+  }, [gridRes, numElements, useWebGL, gameState]);
 
   useEffect(() => {
     const id = Math.random().toString(36).substring(7);
     setMyId(id);
     multiplayerService.init(id);
-    multiplayerService.onPlayerJoined = (id) => {
-       setP2pConnected(true);
-       console.log("Player joined:", id);
-    };
-    
-    multiplayerService.onStateUpdate = (id, data) => {
-       peerInputRef.current = data;
-    };
-    
+    multiplayerService.onPlayerJoined = () => setP2pConnected(true);
+    multiplayerService.onStateUpdate = (id, data) => { peerInputRef.current = data; };
     neuroService.onData = (data) => {
-      if (data.isNeuro) {
-         neuroInputRef.current = data;
-      }
+      touchKeys.current['c'] = data.attention > 0.6;
+      touchKeys.current['z'] = data.meditation > 0.6;
     };
-  }, []);
 
-  const keys = useRef<{ [key: string]: boolean }>({});
-
-  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => (keys.current[e.key] = true);
     const handleKeyUp = (e: KeyboardEvent) => (keys.current[e.key] = false);
     window.addEventListener('keydown', handleKeyDown);
@@ -91,6 +110,87 @@ export default function App() {
     };
   }, []);
 
+  // --- ENGINE RUN: CAMPAIGN LOADER ---
+  const loadCampaignRealm = (index: number) => {
+    const realm = CampaignManager.getRealm(index);
+    if (!realm) {
+      setGameState('CAMPAIGN_HUB');
+      setCampaignIndex(-1);
+      return;
+    }
+    
+    setCampaignIndex(index);
+    setRealmWon(false);
+    
+    const p1Conf = SEMANTIC_PILLS_DB[realm.playerPill] || SEMANTIC_PILLS_DB["Foundation Pill"];
+    const p2Conf = SEMANTIC_PILLS_DB[realm.enemyPill] || SEMANTIC_PILLS_DB["Foundation Pill"];
+    
+    const pStars = Array(realm.teamSize).fill(realm.companionStars);
+    pStars[0] = realm.playerStars; 
+    const eStars = Array(realm.teamSize).fill(realm.enemyStars);
+    
+    const playMode = realm.playerStars > 0 ? 'BvsB' : 'PvsB';
+    
+    // Автоматическая фиксация камеры на арене в авторежимах (BvsB)
+    setCameraMode(realm.playerStars > 0 ? 'FIXED' : 'CENTERED');
+
+    const campaignSettings = {
+       ...settings,
+       injectionIntensity: 150.0 + (upgrades.power * 35.0),
+       springStiffness: 200.0 + (upgrades.defense * 45.0),
+       tensionTear: 2.0 + (upgrades.defense * 0.4),
+       couplingStrength: 25.0 + (upgrades.focus * 6.0)
+    };
+    setSettings(campaignSettings);
+
+    const newArena = new PhaseVortexArena(p1Conf, p2Conf, realm.teamSize, playMode, 80, realm.numElements, campaignGpu, pStars, eStars);
+    
+    setArena(newArena);
+    setMode(playMode);
+    setGridRes(80);
+    setNumElements(realm.numElements);
+    setUseWebGL(campaignGpu);
+    setGameState('ARENA');
+    audioEngine.start();
+  };
+
+  // --- ENGINE RUN: SANDBOX LOADER ---
+  const startSandboxMatch = () => {
+    const buildPillConfig = (pillName: string, customVec: [number, number, number]): PillConfig => {
+       if (pillName === 'Custom') {
+           const norm = Math.max(1e-8, Math.hypot(customVec[0], Math.hypot(customVec[1], customVec[2])));
+           return {
+              name: "Custom Pill",
+              vector: [customVec[0]/norm, customVec[1]/norm, customVec[2]/norm],
+              color: [customVec[0]/norm*255, customVec[1]/norm*255, customVec[2]/norm*255],
+              desc: "Custom Element Mix"
+           };
+       }
+       return SEMANTIC_PILLS_DB[pillName];
+    };
+
+    setCampaignIndex(-1);
+    const p1Conf = buildPillConfig(sandboxConfig.p1Pill, sandboxConfig.p1CustomVec);
+    const p2Conf = buildPillConfig(sandboxConfig.p2Pill, sandboxConfig.p2CustomVec);
+
+    const pStars = [sandboxConfig.p1Stars];
+    const eStars = [sandboxConfig.p2Stars];
+
+    // Автоматическая фиксация камеры, если играет только ИИ
+    setCameraMode(sandboxConfig.p1Stars > 0 ? 'FIXED' : 'CENTERED');
+
+    const newArena = new PhaseVortexArena(p1Conf, p2Conf, sandboxConfig.teamSize, sandboxConfig.mode, sandboxConfig.gridRes, sandboxConfig.numElements, sandboxConfig.gpuEnabled, pStars, eStars);
+    
+    setArena(newArena);
+    setMode(sandboxConfig.mode);
+    setGridRes(sandboxConfig.gridRes);
+    setNumElements(sandboxConfig.numElements);
+    setUseWebGL(sandboxConfig.gpuEnabled);
+    setGameState('ARENA');
+    audioEngine.start();
+  };
+
+  // --- MAIN RENDER LOOP ---
   useEffect(() => {
     if (gameState !== 'ARENA' || !arena) return;
 
@@ -101,11 +201,7 @@ export default function App() {
 
     if (useWebGL && !webglRendererRef.current && webglCanvasRef.current) {
       try {
-        webglRendererRef.current = new WebGLFluidRenderer(
-          webglCanvasRef.current,
-          gridRes,
-          numElements
-        );
+        webglRendererRef.current = new WebGLFluidRenderer(webglCanvasRef.current, gridRes, numElements);
       } catch (e) {
         console.error("Failed to initialize WebGLFluidRenderer:", e);
       }
@@ -115,10 +211,14 @@ export default function App() {
     let animationId: number;
     let frames = 0;
     let fpsStart = performance.now();
+    let isMatchOver = false;
 
     const render = () => {
+      if (isMatchOver) return;
       const now = performance.now();
+      
       const dt = Math.min((now - lastTime) / 1000.0, 0.032);
+      const simDt = dt * settings.timeScale;
       lastTime = now;
       
       frames++;
@@ -128,6 +228,7 @@ export default function App() {
          fpsStart = now;
       }
 
+      // Input Collection
       const k = keys.current;
       let vx = 0, vy = 0, tq = 0, freq = 0, spatial = 0;
       if (k['ArrowUp'] || k['w']) vy -= 1;
@@ -141,67 +242,22 @@ export default function App() {
       if (k['v']) spatial += 1;
       if (k['x']) spatial -= 1;
       
-      // Touch Inputs
       vx += touchMove.dx;
       vy += touchMove.dy;
       if (touchKeys.current['c']) freq += 1;
       if (touchKeys.current['z']) freq -= 1;
       
-      // Hardware Neuro Inputs (FreeEEG16 over BLE or Serial)
-      if (neuroInputRef.current) {
-         const n = neuroInputRef.current;
-         vx += n.vx;
-         vy += n.vy;
-         tq += n.tq;
-         freq += n.freq;
-         spatial += n.spatial;
-      }
-
       if (mode === 'PvsP' && p2pConnected) {
          multiplayerService.broadcast({ vx, vy, tq, freq, spatial });
       }
 
-      const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-      let gp = null;
-      for (let i = 0; i < gamepads.length; i++) {
-        if (gamepads[i] && gamepads[i]!.connected) {
-          gp = gamepads[i];
-          break;
-        }
-      }
-
-      if (gp) {
-        if (gp.axes.length >= 2) {
-          const ax = gp.axes[0];
-          const ay = gp.axes[1];
-          if (Math.abs(ax) > 0.15) vx += ax;
-          if (Math.abs(ay) > 0.15) vy += ay;
-        }
-        if (gp.axes.length >= 4) {
-          const atq = gp.axes[2];
-          if (Math.abs(atq) > 0.15) tq += atq;
-        }
-        if (gp.buttons.length >= 4) {
-          const b1 = gp.buttons[1].value || (gp.buttons[1].pressed ? 1 : 0);
-          const b2 = gp.buttons[2].value || (gp.buttons[2].pressed ? 1 : 0);
-          freq += b1 - b2;
-          
-          const b3 = gp.buttons[3].value || (gp.buttons[3].pressed ? 1 : 0);
-          const b0 = gp.buttons[0].value || (gp.buttons[0].pressed ? 1 : 0);
-          spatial += b3 - b0;
-        }
-      }
-
       const mag = Math.hypot(vx, vy);
-      if (mag > 1.0) {
-        vx /= mag;
-        vy /= mag;
-      }
+      if (mag > 1.0) { vx /= mag; vy /= mag; }
       tq = Math.max(-1.0, Math.min(1.0, tq));
       freq = Math.max(-1.0, Math.min(1.0, freq));
       spatial = Math.max(-1.0, Math.min(1.0, spatial));
 
-      if (arena.cultivators[0].isPlayer) {
+      if (arena.cultivators[0] && arena.cultivators[0].isPlayer && arena.cultivators[0].stars === 0) {
           arena.cultivators[0].vx = vx;
           arena.cultivators[0].vy = vy;
           arena.cultivators[0].tq = tq;
@@ -218,17 +274,43 @@ export default function App() {
              arena.cultivators[1].freqVal = peerInput.freq;
              arena.cultivators[1].spatialVal = peerInput.spatial;
           }
-          arena.cultivators[1].isPlayer = true;
+          arena.cultivators[1].isPlayer = true; 
       }
       
-      arena.step(dt, settings);
+      arena.step(simDt, settings);
       
       if (Math.floor(now / 100) !== Math.floor((now - dt * 1000) / 100)) {
-        const pInfo = { ...arena.cultivators[0] };
-        setPlayerInfo(pInfo);
-        audioEngine.update(Math.hypot(pInfo.vx, pInfo.vy), pInfo.shearStress, pInfo.KActive);
-        setBotInfo({ ...(arena.cultivators.find(c => c.team === 1) || arena.cultivators[1]) });
+        const p1 = arena.cultivators[0];
+        const p2 = arena.cultivators.find(c => c.team === 1) || arena.cultivators[1];
+        setPlayerInfo(p1 ? { ...p1 } : null);
+        setBotInfo(p2 ? { ...p2 } : null);
         setTime(arena.time);
+        if (p1) audioEngine.update(p1.vx, p1.shearStress, p1.KActive);
+
+        // Условие конца боя (теперь мертвые отсекаются по IsDead)
+        const team0Alive = arena.cultivators.some(c => c.team === 0 && !c.isDead);
+        const team1Alive = arena.cultivators.some(c => c.team === 1 && !c.isDead);
+
+        if (!team0Alive || !team1Alive || (campaignIndex === 0 && arena.time > 12.0)) {
+           isMatchOver = true;
+           
+           const stats: CultivatorStats[] = arena.cultivators.map(c => ({
+              id: c.id,
+              name: c.pillName + (c.isPlayer ? " (You)" : ""),
+              team: c.team,
+              damageDealt: c.damageDealt,
+              integrity: c.integrity,
+              isPlayer: c.isPlayer
+           }));
+           setEndMatchStats(stats);
+
+           let won = team0Alive && !team1Alive;
+           if (campaignIndex === 0) won = true; 
+
+           setMatchResult(won ? 'VICTORY' : 'DEFEAT');
+           setGameState('POST_MATCH');
+           return;
+        }
       }
 
       const colorsPalette = [
@@ -242,16 +324,19 @@ export default function App() {
          [128, 255, 128]
       ];
 
-      if (useWebGL && webglRendererRef.current) {
+      // Отрисовка жидкостей с учетом режима камеры (Fixed/Centered)
+      if (useWebGL && webglRendererRef.current && arena.cultivators[0]) {
          const p0 = arena.cultivators[0];
-         const pxNorm = p0.pos.x / 800.0;
-         const pyNorm = p0.pos.y / 800.0;
-         webglRendererRef.current.render(arena.fluid.density, arena.time, [pxNorm, pyNorm], p0.angle, 1.35, settings);
+         const pxNorm = cameraMode === 'CENTERED' ? p0.pos.x / 800.0 : 0.5;
+         const pyNorm = cameraMode === 'CENTERED' ? p0.pos.y / 800.0 : 0.5;
+         const angle = cameraMode === 'CENTERED' ? p0.angle : 0.0;
+         const zoom = cameraMode === 'CENTERED' ? 1.35 : 1.0;
+         webglRendererRef.current.render(arena.fluid.density, arena.time, [pxNorm, pyNorm], angle, zoom, settings);
       }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       
-      if (!useWebGL) {
+      if (!useWebGL && arena.cultivators[0]) {
           const id = ctx.createImageData(gridRes, gridRes);
           const data = id.data;
           const tf = arena.time * 12.0;
@@ -261,10 +346,7 @@ export default function App() {
              const y = Math.floor(i / gridRes);
              
              if (x === 0 || x === gridRes - 1 || y === 0 || y === gridRes - 1) {
-                data[i * 4] = 12;
-                data[i * 4 + 1] = 12;
-                data[i * 4 + 2] = 12;
-                data[i * 4 + 3] = 255;
+                data[i * 4] = 12; data[i * 4 + 1] = 12; data[i * 4 + 2] = 12; data[i * 4 + 3] = 255;
                 continue;
              }
 
@@ -291,12 +373,12 @@ export default function App() {
 
           ctx.save();
           ctx.translate(canvas.width / 2, canvas.height / 2);
-          ctx.rotate(-arena.cultivators[0].angle);
-          const zoom = 1.35;
+          ctx.rotate(cameraMode === 'CENTERED' ? -arena.cultivators[0].angle : 0.0);
+          const zoom = cameraMode === 'CENTERED' ? 1.35 : 1.0;
           ctx.scale(1.0 / zoom, 1.0 / zoom);
           
-          const px = (arena.cultivators[0].pos.x / 800.0) * canvas.width;
-          const py = (arena.cultivators[0].pos.y / 800.0) * canvas.height;
+          const px = cameraMode === 'CENTERED' ? (arena.cultivators[0].pos.x / 800.0) * canvas.width : 400;
+          const py = cameraMode === 'CENTERED' ? (arena.cultivators[0].pos.y / 800.0) * canvas.height : 400;
           ctx.translate(-px, -py);
 
           ctx.imageSmoothingEnabled = true;
@@ -305,68 +387,69 @@ export default function App() {
       }
 
       const p0 = arena.cultivators[0];
-      const theta = -p0.angle;
-      const cos_t = Math.cos(theta);
-      const sin_t = Math.sin(theta);
-      const zoomFactor = 1.35;
+      if (p0) {
+        // ИСПРАВЛЕНИЕ: Матрицы поворота getScreenCoords теперь идеально синхронизированы в одном направлении!
+        const theta = cameraMode === 'CENTERED' ? -p0.angle : 0.0;
+        const cos_t = Math.cos(theta);
+        const sin_t = Math.sin(theta);
+        const camX = cameraMode === 'CENTERED' ? p0.pos.x : 400;
+        const camY = cameraMode === 'CENTERED' ? p0.pos.y : 400;
+        const zoomFactor = cameraMode === 'CENTERED' ? 1.35 : 1.0;
 
-      const getScreenCoords = (wx: number, wy: number) => {
-          const dx = wx - p0.pos.x;
-          const dy = wy - p0.pos.y;
-          const sx = canvas.width / 2.0 + (dx * cos_t + dy * sin_t) / zoomFactor;
-          const sy = canvas.height / 2.0 + (-dx * sin_t + dy * cos_t) / zoomFactor;
-          return { x: sx, y: sy };
-      };
+        const getScreenCoords = (wx: number, wy: number) => {
+            const dx = wx - camX;
+            const dy = wy - camY;
+            return {
+               x: canvas.width / 2.0 + (dx * cos_t - dy * sin_t) / zoomFactor,
+               y: canvas.height / 2.0 + (dx * sin_t + dy * cos_t) / zoomFactor
+            };
+        };
 
-      for (const c of arena.cultivators) {
-        for (let i = 0; i < c.nodes.length; i++) {
-          const node = c.nodes[i];
-          const next = c.nodes[(i + 1) % c.nodes.length];
-          
-          const sNode = getScreenCoords(node.x, node.y);
-          const sNext = getScreenCoords(next.x, next.y);
+        for (const c of arena.cultivators) {
+          if (c.isDead) continue; // Мертвые не рисуются
 
-          ctx.beginPath();
-          ctx.moveTo(sNode.x, sNode.y);
-          ctx.lineTo(sNext.x, sNext.y);
-          if (node.intact) {
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = `rgba(255, 255, 255, 0.45)`;
-          } else {
-            ctx.lineWidth = 1;
-            ctx.strokeStyle = `rgba(255, 0, 0, 0.45)`;
+          for (let i = 0; i < c.nodes.length; i++) {
+            const node = c.nodes[i];
+            const next = c.nodes[(i + 1) % c.nodes.length];
+            const sNode = getScreenCoords(node.x, node.y);
+            const sNext = getScreenCoords(next.x, next.y);
+
+            ctx.beginPath();
+            ctx.moveTo(sNode.x, sNode.y);
+            ctx.lineTo(sNext.x, sNext.y);
+            ctx.lineWidth = node.intact ? 2 : 1;
+            ctx.strokeStyle = node.intact ? `rgba(255, 255, 255, 0.45)` : `rgba(255, 0, 0, 0.45)`;
+            ctx.stroke();
           }
-          ctx.stroke();
-        }
 
-        for (const node of c.nodes) {
-          const sNode = getScreenCoords(node.x, node.y);
+          for (const node of c.nodes) {
+            const sNode = getScreenCoords(node.x, node.y);
+            ctx.beginPath();
+            ctx.arc(sNode.x, sNode.y, 5, 0, Math.PI * 2);
+            
+            let r = c.color[0], g = c.color[1], b = c.color[2];
+            if (node.vector[0] > node.vector[1] && node.vector[0] > node.vector[2]) { r=255; g=50; b=0; }
+            else if (node.vector[1] > node.vector[0] && node.vector[1] > node.vector[2]) { r=0; g=255; b=50; }
+            else if (node.vector[2] > node.vector[0] && node.vector[2] > node.vector[1]) { r=0; g=150; b=255; }
+            
+            ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.95)`;
+            ctx.fill();
+            
+            ctx.beginPath();
+            ctx.arc(sNode.x, sNode.y, 8, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.55)`;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          }
 
-          ctx.beginPath();
-          ctx.arc(sNode.x, sNode.y, 5, 0, Math.PI * 2);
-          
-          let r = c.color[0], g = c.color[1], b = c.color[2];
-          if (node.vector[0] > node.vector[1] && node.vector[0] > node.vector[2]) { r=255; g=50; b=0; }
-          else if (node.vector[1] > node.vector[0] && node.vector[1] > node.vector[2]) { r=0; g=255; b=50; }
-          else if (node.vector[2] > node.vector[0] && node.vector[2] > node.vector[1]) { r=0; g=150; b=255; }
-          
-          ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.95)`;
-          ctx.fill();
-          
-          ctx.beginPath();
-          ctx.arc(sNode.x, sNode.y, 8, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, 0.55)`;
-          ctx.lineWidth = 1;
-          ctx.stroke();
-        }
-
-        if (c.domainCharge > 0.05) {
-          const sCOM = getScreenCoords(c.pos.x, c.pos.y);
-          ctx.beginPath();
-          ctx.arc(sCOM.x, sCOM.y, (c.domainCharge * 40 + 20) / zoomFactor, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(255, 0, 255, 0.45)`;
-          ctx.lineWidth = 3;
-          ctx.stroke();
+          if (c.domainCharge > 0.05) {
+            const sCOM = getScreenCoords(c.pos.x, c.pos.y);
+            ctx.beginPath();
+            ctx.arc(sCOM.x, sCOM.y, (c.domainCharge * 40 + 20) / zoomFactor, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255, 0, 255, 0.45)`;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+          }
         }
       }
 
@@ -374,162 +457,25 @@ export default function App() {
     };
 
     render();
-    return () => cancelAnimationFrame(animationId);
-  }, [gameState, arena, useWebGL, gridRes, numElements, settings]);
+    return () => { isMatchOver = true; cancelAnimationFrame(animationId); };
+  }, [gameState, arena, useWebGL, gridRes, numElements, settings, campaignIndex, cameraMode]);
 
-  const buildPillConfig = (pillName: string, customVec: [number, number, number] | Float32Array): PillConfig => {
-     if (pillName === 'Custom') {
-         const norm = Math.max(1e-8, Math.hypot(customVec[0], Math.hypot(customVec[1], customVec[2])));
-         return {
-            name: "Custom Pill",
-            vector: [customVec[0]/norm, customVec[1]/norm, customVec[2]/norm],
-            color: [customVec[0]/norm*255, customVec[1]/norm*255, customVec[2]/norm*255],
-            desc: "Custom Element Mix"
-         };
-     }
-     return SEMANTIC_PILLS_DB[pillName];
-  };
-
-  const renderSliders = (vec: [number, number, number], setVec: (v: [number, number, number]) => void) => (
-     <div className="space-y-2 mt-2">
-        <label className="flex items-center gap-2 text-xs text-red-400">
-           Yang: <input type="range" min="0" max="1" step="0.1" value={vec[0]} onChange={e => setVec([parseFloat(e.target.value), vec[1], vec[2]])} className="w-full accent-red-500" />
-        </label>
-        <label className="flex items-center gap-2 text-xs text-green-400">
-           Catalyst: <input type="range" min="0" max="1" step="0.1" value={vec[1]} onChange={e => setVec([vec[0], parseFloat(e.target.value), vec[2]])} className="w-full accent-green-500" />
-        </label>
-        <label className="flex items-center gap-2 text-xs text-blue-400">
-           Yin: <input type="range" min="0" max="1" step="0.1" value={vec[2]} onChange={e => setVec([vec[0], vec[1], parseFloat(e.target.value)])} className="w-full accent-blue-500" />
-        </label>
-     </div>
-  );
+  // --- RENDERING SCREENS ---
 
   if (gameState === 'MENU') {
-    const pillOptions = [...Object.keys(SEMANTIC_PILLS_DB), "Custom"];
     return (
-      <div className="min-h-screen bg-[#0a0c12] text-slate-300 font-mono flex items-center justify-center p-8">
-         <div className="bg-slate-950/80 border border-cyan-900/50 p-8 shadow-2xl max-w-2xl w-full">
-            <h1 className="text-3xl text-cyan-400 font-bold mb-8 text-center tracking-widest border-b border-slate-800 pb-4">
+      <div className="min-h-screen bg-[#0a0c12] text-slate-300 font-mono flex items-center justify-center p-8 z-50 relative">
+         <div className="bg-slate-950/80 border border-cyan-900/50 p-8 shadow-2xl max-w-2xl w-full text-center">
+            <h1 className="text-4xl text-cyan-400 font-bold mb-8 tracking-widest border-b border-slate-800 pb-4">
               PHASE VORTEX ARENA
             </h1>
-
-            <div className="space-y-8">
-               <div>
-                  <h2 className="text-xl text-slate-200 mb-4">Mode Selection</h2>
-                  <div className="flex gap-4 mb-4 items-center">
-                    <span className="text-sm font-bold text-slate-400">Settings:</span>
-                    <label className="text-xs text-slate-500">Elements:
-                        <select className="ml-2 bg-slate-900 border border-slate-700 rounded px-2 py-1" value={numElements} onChange={e => setNumElements(parseInt(e.target.value))}>
-                            <option value={3}>3 (RGB)</option>
-                            <option value={5}>5 (Wu Xing)</option>
-                            <option value={7}>7 (Rainbow)</option>
-                        </select>
-                    </label>
-                    <label className="text-xs text-slate-500">Grid Res:
-                        <select className="ml-2 bg-slate-900 border border-slate-700 rounded px-2 py-1" value={gridRes} onChange={e => setGridRes(parseInt(e.target.value))}>
-                            <option value={60}>60 (Fast)</option>
-                            <option value={80}>80 (Normal)</option>
-                            <option value={100}>100 (Detailed)</option>
-                        </select>
-                    </label>
-                    <label className="text-xs text-slate-500 flex items-center gap-2 cursor-pointer border border-slate-700 rounded px-2 py-1">
-                        <input type="checkbox" checked={gpuEnabled} onChange={e => setGpuEnabled(e.target.checked)} className="accent-cyan-400" /> GPU Sim (WebGL2)
-                    </label>
-                  </div>
-                  
-                  <div className="flex gap-4 mb-4">
-                     <button className={`px-4 py-2 border ${mode === 'PvsP' ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`} onClick={() => setMode('PvsP')}>PvsP (P2P)</button>
-                  </div>
-                  {mode === 'PvsP' && (
-                     <div className="flex gap-4 mb-4 flex-col text-xs p-2 border border-cyan-800 bg-cyan-950/20">
-                       <p className="text-cyan-400">My ID: <span className="font-mono text-white">{myId}</span></p>
-                       <div className="flex gap-2">
-                         <input type="text" placeholder="Peer ID" value={peerId} onChange={e => setPeerId(e.target.value)} className="bg-slate-900 border border-slate-700 p-1 text-white flex-1" />
-                         <button className="bg-cyan-800 px-3 hover:bg-cyan-700 text-white" onClick={() => multiplayerService.connect(peerId)}>Connect</button>
-                       </div>
-                       <p className="text-green-400">{p2pConnected ? "Connected to Peer!" : "Waiting..."}</p>
-                     </div>
-                  )}
-                  
-                  <div className="flex gap-2 mb-4 flex-wrap">
-                    <button className="px-3 py-1 border border-indigo-500/50 text-indigo-400 text-xs hover:bg-indigo-900/30" onClick={() => neuroService.connectBLE()}>Connect FreeEEG16 BLE Array</button>
-                    <button className="px-3 py-1 border border-indigo-500/50 text-indigo-400 text-xs hover:bg-indigo-900/30" onClick={() => neuroService.connectUART()}>Connect UART EEG Dongle</button>
-                  </div>
-                  
-                  <div className="flex gap-4 mb-4">                     
-                     <button className={`px-4 py-2 border ${teamSize === 1 ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`} onClick={() => setTeamSize(1)}>1v1</button>
-                     <button className={`px-4 py-2 border ${teamSize === 3 ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`} onClick={() => setTeamSize(3)}>3v3</button>
-                     <button className={`px-4 py-2 border ${teamSize === 5 ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`} onClick={() => setTeamSize(5)}>5v5</button>
-                  </div>
-                  <div className="flex gap-4">
-                     <button 
-                        className={`px-4 py-2 border ${mode === 'PvsB' ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`}
-                        onClick={() => setMode('PvsB')}
-                     >
-                        Player vs Bot
-                     </button>
-                     <button 
-                        className={`px-4 py-2 border ${mode === 'BvsB' ? 'border-cyan-400 text-cyan-400 bg-cyan-950/30' : 'border-slate-700 text-slate-500'}`}
-                        onClick={() => setMode('BvsB')}
-                     >
-                        Bot vs Bot
-                     </button>
-                  </div>
-               </div>
-
-               <div className="grid grid-cols-2 gap-8">
-                 <div>
-                    <h2 className="text-lg text-cyan-300 mb-2">Player 1 Core</h2>
-                    <select 
-                      className="w-full bg-slate-900 border border-slate-700 p-2 text-sm text-cyan-100"
-                      value={p1Pill}
-                      onChange={(e) => setP1Pill(e.target.value)}
-                    >
-                      {pillOptions.map(p => (
-                        <option key={p} value={p}>{p}</option>
-                      ))}
-                    </select>
-                    {p1Pill === "Custom" && renderSliders(p1CustomVec, setP1CustomVec)}
-                    <div className="mt-2 text-xs text-slate-500 h-10">
-                       {p1Pill === "Custom" ? "Custom Elements" : SEMANTIC_PILLS_DB[p1Pill]?.desc}
-                    </div>
-                 </div>
-                 
-                 <div>
-                    <h2 className="text-lg text-red-300 mb-2">Player 2 Core (Rogue)</h2>
-                    <select 
-                      className="w-full bg-slate-900 border border-slate-700 p-2 text-sm text-red-100"
-                      value={p2Pill}
-                      onChange={(e) => setP2Pill(e.target.value)}
-                    >
-                      {pillOptions.map(p => (
-                        <option key={p} value={p}>{p}</option>
-                      ))}
-                    </select>
-                    {p2Pill === "Custom" && renderSliders(p2CustomVec, setP2CustomVec)}
-                    <div className="mt-2 text-xs text-slate-500 h-10">
-                       {p2Pill === "Custom" ? "Custom Elements" : SEMANTIC_PILLS_DB[p2Pill]?.desc}
-                    </div>
-                 </div>
-               </div>
-
-               <button 
-                  className="w-full py-4 bg-cyan-900/40 border border-cyan-500 text-cyan-300 hover:bg-cyan-800/60 hover:text-white transition-colors text-xl font-bold tracking-[0.2em] cursor-pointer"
-                  onClick={() => {
-                     const v1 = new Float32Array(numElements);
-                     v1[0] = 1;
-                     const p1Conf = buildPillConfig(p1Pill, p1Pill === 'Custom' ? p1CustomVec : v1);
-                     
-                     const v2 = new Float32Array(numElements);
-                     v2[1 % numElements] = 1;
-                     const p2Conf = buildPillConfig(p2Pill, p2Pill === 'Custom' ? p2CustomVec : v2);
-
-                     setArena(new PhaseVortexArena(p1Conf, p2Conf, teamSize, mode, gridRes, numElements, gpuEnabled));
-                     setGameState('ARENA');
-                     audioEngine.start();
-                  }}
-               >
-                  INITIALIZE ARENA
+            <p className="mb-8 text-slate-400">Tactical Alchemical Wave Simulator</p>
+            <div className="space-y-4">
+               <button className="w-full py-4 bg-indigo-900/50 border border-indigo-500 text-white font-bold hover:bg-indigo-700 cursor-pointer" onClick={() => setGameState('CAMPAIGN_HUB')}>
+                  ALCHEMICAL CAMPAIGN
+               </button>
+               <button className="w-full py-4 bg-cyan-900/30 border border-cyan-800 text-cyan-200 font-bold hover:bg-cyan-800/50 cursor-pointer" onClick={() => setGameState('SANDBOX_MENU')}>
+                  SANDBOX / DEBUGGER
                </button>
             </div>
          </div>
@@ -537,119 +483,95 @@ export default function App() {
     );
   }
 
-  return (
-    <div className="min-h-screen bg-[#0a0c12] text-slate-300 font-mono flex flex-col items-center justify-center relative overflow-hidden p-4">
-      
-      <div className="w-full max-w-[800px] flex justify-between items-center mb-2 px-2 text-xs">
-          <div className="text-slate-500">
-             FPS: <span className={fps >= 45 ? "text-emerald-400" : "text-orange-400"}>{fps}</span> | ENGINE: {arena?.fluid.gpuActive ? 'WebGL2 GPGPU' : 'Canvas2D CPU Fallback'} ({gridRes}x{gridRes}, {numElements} Elements)
-          </div>
-          <button 
-             className="px-3 py-1 border border-slate-700 hover:bg-slate-800 hover:text-white text-slate-400 cursor-pointer"
-             onClick={() => setGameState('MENU')}
-          >
-             ABORT
-          </button>
-      </div>
+  if (gameState === 'SANDBOX_MENU') {
+    return <SandboxMenu 
+              config={sandboxConfig}
+              setConfig={setSandboxConfig}
+              myId={myId}
+              peerId={peerId}
+              setPeerId={setPeerId}
+              p2pConnected={p2pConnected}
+              onStartMatch={startSandboxMatch}
+              onBack={() => setGameState('MENU')}
+           />;
+  }
 
-      <div className="relative shadow-2xl shadow-cyan-900/20 border border-slate-800">
+  if (gameState === 'CAMPAIGN_HUB') {
+    return (
+       <CampaignHub 
+          maxRealmReached={maxRealmReached}
+          essence={essence}
+          campaignGpu={campaignGpu}
+          setCampaignGpu={setCampaignGpu}
+          upgrades={upgrades}
+          onBuyUpgrade={(stat) => {
+             const cost = 150;
+             if (essence >= cost) {
+                setEssence(e => e - cost);
+                setUpgrades(prev => ({ ...prev, [stat]: prev[stat] + 1 }));
+             }
+          }}
+          onEnterRealm={loadCampaignRealm}
+          onBack={() => setGameState('MENU')}
+       />
+    );
+  }
+
+  if (gameState === 'POST_MATCH') {
+    return (
+       <PostMatchHUD 
+          stats={endMatchStats}
+          matchResult={matchResult}
+          earnedEssence={campaignIndex >= 0 ? CampaignManager.getRealm(campaignIndex)?.reward || 50 : 0}
+          isCampaign={campaignIndex >= 0}
+          onContinue={() => {
+             if (campaignIndex >= 0) {
+                const currentRealm = CampaignManager.getRealm(campaignIndex);
+                const isVictory = matchResult === 'VICTORY';
+                
+                if (isVictory) {
+                   setEssence(e => e + (currentRealm?.reward || 50));
+                   if (campaignIndex > maxRealmReached) {
+                      setMaxRealmReached(campaignIndex); 
+                   }
+                }
+                setGameState('CAMPAIGN_HUB');
+             } else {
+                setGameState('SANDBOX_MENU'); 
+             }
+          }}
+       />
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#0a0c12] text-slate-300 font-mono flex flex-col items-center justify-center relative overflow-hidden">
+      <div className="relative w-full max-w-[800px] h-[800px] shadow-2xl border border-slate-800 flex justify-center">
         <canvas ref={webglCanvasRef} width={CONFIG.WIDTH} height={CONFIG.HEIGHT} className="absolute inset-0 bg-black pointer-events-auto" style={{ display: useWebGL ? 'block' : 'none' }} />
         <canvas ref={canvasRef} width={CONFIG.WIDTH} height={CONFIG.HEIGHT} className="relative z-10 pointer-events-none" style={{ background: 'transparent' }} />
         
-        {playerInfo && (
-          <div className="absolute top-4 left-4 bg-slate-950/85 border border-cyan-800 p-4 w-72 backdrop-blur-sm z-20">
-            <h2 className="text-cyan-400 font-bold mb-3 tracking-wider">{mode === 'PvsB' ? 'CONNECTOME (P1)' : 'AUTO-CONNECTOME (P1)'}</h2>
-            <div className="space-y-1 text-xs">
-              <p><span className="text-slate-500">Your Core   :</span> <span className="text-cyan-200">{playerInfo.pillName}</span></p>
-              <p><span className="text-slate-500">Integrity   :</span> <span className="text-emerald-400">{(playerInfo.integrity * 100).toFixed(1)}%</span></p>
-              <p><span className="text-slate-500">Dissonance  :</span> <span className="text-orange-300">{playerInfo.shearStress.toFixed(2)}</span></p>
-              <p><span className="text-slate-500">Coupling (K):</span> {playerInfo.KActive.toFixed(1)}</p>
-              <div className="my-2 border-t border-slate-800"></div>
-              <p><span className="text-slate-500">Freq Output :</span> <span className="text-cyan-300">{playerInfo.freqVal.toFixed(2)}</span></p>
-              <p><span className="text-slate-500">Spat Output :</span> <span className="text-cyan-300">{playerInfo.spatialVal.toFixed(2)}</span></p>
-              <p><span className="text-slate-500">Domain Pulse:</span> <span className="text-purple-400">{(playerInfo.domainCharge * 100).toFixed(1)}%</span></p>
-            </div>
-            {mode === 'PvsB' && (
-              <div className="mt-4 pt-2 border-t border-slate-800 text-[10px] text-slate-500">
-                Control: WASD to Move, Q/E to Spin, Z/C/X/V to Coherence (Gamepad: Bumpers & Face Buttons)
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ПАНЕЛЬ ТОНКОЙ КАЛИБРОВКИ НЕЙРОФИДБЕКА / СЛАЙДЕРЫ */}
-        <div className="absolute bottom-16 left-4 bg-slate-950/90 border border-slate-800 p-4 w-80 text-xs space-y-3 z-30 max-h-[350px] overflow-y-auto backdrop-blur-md">
-           <h3 className="text-cyan-400 font-bold uppercase tracking-wider border-b border-slate-800 pb-1">BCI / Calibration Panel</h3>
-           
-           <label className="block text-slate-400">Wave Speed (Hbar): {settings.hbar.toFixed(0)}
-              <input type="range" min="10" max="300" step="5" value={settings.hbar} onChange={e => setSettings({...settings, hbar: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">Decay (Persistence): {settings.decay.toFixed(4)}
-              <input type="range" min="0.99" max="1.0" step="0.0001" value={settings.decay} onChange={e => setSettings({...settings, decay: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">Source Area (Radius): {settings.injectionRadius.toFixed(3)}
-              <input type="range" min="0.01" max="0.15" step="0.005" value={settings.injectionRadius} onChange={e => setSettings({...settings, injectionRadius: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">Source Power (Amplitude): {settings.injectionIntensity.toFixed(0)}
-              <input type="range" min="10" max="300" step="5" value={settings.injectionIntensity} onChange={e => setSettings({...settings, injectionIntensity: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">Cahn-Hilliard Sharpening: {settings.cahnHilliardSharpen.toFixed(1)}
-              <input type="range" min="0.0" max="10.0" step="0.5" value={settings.cahnHilliardSharpen} onChange={e => setSettings({...settings, cahnHilliardSharpen: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">Phase Locking Coupling (K): {settings.couplingStrength.toFixed(1)}
-              <input type="range" min="5.0" max="100.0" step="1.0" value={settings.couplingStrength} onChange={e => setSettings({...settings, couplingStrength: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">PAC (Theta-Gamma Coupling): {settings.pacStrength.toFixed(1)}
-              <input type="range" min="0.0" max="15.0" step="0.5" value={settings.pacStrength} onChange={e => setSettings({...settings, pacStrength: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">Stripe Wave Freq: {settings.stripeFreq.toFixed(0)}
-              <input type="range" min="5" max="60" step="1" value={settings.stripeFreq} onChange={e => setSettings({...settings, stripeFreq: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">Stripe Contrast: {settings.stripeContrast.toFixed(1)}
-              <input type="range" min="0.5" max="4.0" step="0.1" value={settings.stripeContrast} onChange={e => setSettings({...settings, stripeContrast: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">Softbody Stiffness: {settings.springStiffness.toFixed(0)}
-              <input type="range" min="50" max="500" step="10" value={settings.springStiffness} onChange={e => setSettings({...settings, springStiffness: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-
-           <label className="block text-slate-400">Tension Tear Threshold: {settings.tensionTear.toFixed(1)}
-              <input type="range" min="1.1" max="5.0" step="0.1" value={settings.tensionTear} onChange={e => setSettings({...settings, tensionTear: parseFloat(e.target.value)})} className="w-full accent-cyan-400 mt-1" />
-           </label>
-        </div>
-
-        {botInfo && (
-          <div className="absolute top-4 right-4 bg-slate-950/85 border border-red-900/50 p-4 w-72 backdrop-blur-sm text-right z-20">
-            <h2 className="text-red-400 font-bold mb-3 tracking-wider">ROGUE CULTIVATOR (P2)</h2>
-            <div className="space-y-1 text-xs">
-              <p><span className="text-red-200">{botInfo.pillName}</span> <span className="text-slate-500">: Rogue Core</span></p>
-              <p><span className={botInfo.integrity > 0.4 ? "text-emerald-400" : "text-red-500"}>{(botInfo.integrity * 100).toFixed(1)}%</span> <span className="text-slate-500">: Integrity</span></p>
-              <p><span className="text-orange-300">{botInfo.shearStress.toFixed(2)}</span> <span className="text-slate-500">: Dissonance</span></p>
-              <p>{botInfo.KActive.toFixed(1)} <span className="text-slate-500">: Coupling (K)</span></p>
-              <div className="my-2 border-t border-slate-800"></div>
-              <p><span className="text-purple-400">{(botInfo.domainCharge * 100).toFixed(1)}%</span> <span className="text-slate-500">: Domain Pulse</span></p>
-            </div>
-          </div>
-        )}
-
-        <div className="absolute bottom-0 left-0 right-0 bg-slate-950/90 border-t border-slate-800 p-2 flex justify-between px-6 text-xs text-slate-500 backdrop-blur-sm z-20">
-          <span>TIME: {time.toFixed(2)}s</span>
-          <span className="text-cyan-500">QUANTUM ALCHEMY REACTOR - PHASE VORTEX ENGINE</span>
-        </div>
-
-        <TouchControls 
-          onMove={(dx, dy) => setTouchMove({dx, dy})} 
-          onAction={(action, active) => { touchKeys.current[action] = active; }} 
+        <ArenaHUD 
+          playerInfo={playerInfo}
+          botInfo={botInfo}
+          mode={mode}
+          time={time}
+          fps={fps}
+          engineText={`ENGINE: ${arena?.fluid.gpuActive ? 'WebGL2 GPGPU' : 'CPU'} (${gridRes}x${gridRes})`}
+          settings={settings}
+          setSettings={setSettings}
+          cameraMode={cameraMode}
+          setCameraMode={setCameraMode}
+          onAbort={() => setGameState(campaignIndex >= 0 ? 'CAMPAIGN_HUB' : 'SANDBOX_MENU')}
         />
-      </div>    
-    </div>  
+
+        {/* Тачпад активен только если Player 1 не автоматизирован и под ручным контролем */}
+        {(!arena?.cultivators[0] || arena.cultivators[0].stars === 0) && (
+           <TouchControls 
+             onMove={(dx, dy) => setTouchMove({dx, dy})} 
+             onAction={(action, active) => { touchKeys.current[action] = active; }} 
+           />
+        )}
+      </div>
+    </div>
   );
 }

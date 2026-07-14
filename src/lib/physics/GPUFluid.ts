@@ -1,3 +1,4 @@
+// src/lib/physics/GPUFluid.ts
 import { dX, dY, dTQ } from './Coherence';
 
 class GPGPUBlob {
@@ -476,7 +477,7 @@ export class GPUFluidSolver {
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     this.velocityBuffer.swap();
 
-    // Синхронизация инжекции с Python-формулой: жестко фиксированная интенсивность 30.0 (rate = 30.0 * dt)
+    // ИСПРАВЛЕНИЕ: Берем интенсивность напрямую из настроек (как было изначально)
     gl.useProgram(this.injectElementWavesProgram);
     gl.uniform2f(gl.getUniformLocation(this.injectElementWavesProgram, "u_playerCOM"), pCOM[0], pCOM[1]);
     gl.uniform2f(gl.getUniformLocation(this.injectElementWavesProgram, "u_botCOM"), bCOM[0], bCOM[1]);
@@ -487,7 +488,7 @@ export class GPUFluidSolver {
     gl.uniform1i(gl.getUniformLocation(this.injectElementWavesProgram, "u_blocks"), this.blocks);
     
     gl.uniform1f(gl.getUniformLocation(this.injectElementWavesProgram, "u_injectionRadius"), activeSettings.injectionRadius);
-    gl.uniform1f(gl.getUniformLocation(this.injectElementWavesProgram, "u_injectionIntensity"), 30.0);
+    gl.uniform1f(gl.getUniformLocation(this.injectElementWavesProgram, "u_injectionIntensity"), activeSettings.injectionIntensity);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.densityBuffer.writeFBO);
     gl.viewport(0, 0, N, N * this.blocks);
@@ -576,38 +577,6 @@ export class GPUFluidSolver {
 
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     this.densityBuffer.swap();
-
-    // Шаг Шрёдингера закомментирован на GPU для полного соответствия стабильной физике Python
-    /*
-    const hbar_over_m = activeSettings.hbar;
-    const maxSubDt = Math.min(0.002, 0.22 / Math.max(1e-5, hbar_over_m));
-    const steps = Math.max(5, Math.ceil(dt / maxSubDt));
-    const subDt = dt / steps;
-
-    gl.useProgram(this.schrodingerProgram);
-    gl.uniform1f(gl.getUniformLocation(this.schrodingerProgram, "u_dt"), subDt);
-    gl.uniform1f(gl.getUniformLocation(this.schrodingerProgram, "u_hbar_over_m"), hbar_over_m);
-    gl.uniform2f(gl.getUniformLocation(this.schrodingerProgram, "u_texelSize"), 1.0 / N, 1.0 / N);
-    gl.uniform1i(gl.getUniformLocation(this.schrodingerProgram, "u_blocks"), this.blocks);
-    gl.uniform1i(gl.getUniformLocation(this.schrodingerProgram, "u_numElements"), this.numElements);
-    
-    gl.uniform1f(gl.getUniformLocation(this.schrodingerProgram, "u_cahnHilliardSharpen"), activeSettings.cahnHilliardSharpen);
-    gl.uniform1f(gl.getUniformLocation(this.schrodingerProgram, "u_decay"), activeSettings.decay);
-    gl.uniform1f(gl.getUniformLocation(this.schrodingerProgram, "u_couplingStrength"), activeSettings.couplingStrength);
-    gl.uniform1f(gl.getUniformLocation(this.schrodingerProgram, "u_pacStrength"), activeSettings.pacStrength);
-
-    gl.viewport(0, 0, N, N * this.blocks);
-
-    for (let step = 0; step < steps; step++) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, this.densityBuffer.writeFBO);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.densityBuffer.readTex);
-      gl.uniform1i(gl.getUniformLocation(this.schrodingerProgram, "u_density"), 0);
-
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
-      this.densityBuffer.swap();
-    }
-    */
 
     this.time += dt;
     this.downloadData();
