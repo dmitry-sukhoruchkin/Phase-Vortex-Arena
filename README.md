@@ -68,6 +68,31 @@ When equal-tier cultivators clash, the physical damage calculations scale direct
 
 ---
 
+## 🧠 The Spectral-Physical Continuum Hypothesis (Non-Scripted Wave Paradigm)
+
+A major research direction of this framework is the **Spectral-Physical Continuum Hypothesis**, which proposes that a BCI operator can learn to intuitively govern complex physical environments when raw, unreduced brainwaves are mapped continuously to physical fluid rheology. 
+
+Instead of hardcoding discrete actions (e.g. `if (freq == Beta) { move(); }`), the engine integrates the raw 100-Hz phase-coherence spectrum into continuous fluid dynamics, allowing fluid viscosity, surface tension, buoyancy, and local shear stress to emerge natively from the local state vector of the wave fields.
+
+### 🧬 Continuous Spectrum-to-Matter Mapping
+*   **Viscous Stabilization / Gating (Delta/Theta/Alpha | 1–15 Hz)**: 
+    *   *Cognitive Correlate*: Associated with deep-layer, top-down cortical inhibition, working memory maintenance, and meditative synchronization.
+    *   *Physical Emergence*: Increases the fluid's local viscosity $\mu(x, y)$ and soft-body node spring stiffness. High-coherence states mathematically "crystallize" the medium, converting liquid into a dense protective gel shield that absorbs and parries kinetic stress.
+*   **Phase-Velocity Propulsive Advection (Beta | 18–36 Hz)**:
+    *   *Cognitive Correlate*: Generated during active motor imagery and motor-cortex planning.
+    *   *Physical Emergence*: Triggers phase-locking on waves whose length $\lambda(f)$ matches the spatial step of the 16-node slime ring. The spatial phase gradient $\nabla\Phi$ of these waves generates direct, directional laminar currents. The wave's phase velocity literally pushes the fluid, acting as a reactive "jet engine" that propels the cultivator.
+*   **Volatile Buoyancy & Cavitational Shear (Gamma | 60–100 Hz)**:
+    *   *Cognitive Correlate*: Associated with localized bottom-up sensory processing, intense spatial focus, and cognitive binding.
+    *   *Physical Emergence*: Promotes thermal convective buoyancy (forcing the fluid to rise vertically) and sharp, high-frequency spatial gradients that create turbulent micro-vortices. The boundary of the cultivator acts as a cavitational saw, tearing through opposing spring nodes.
+
+### 🔬 Experimental Validation Methods
+To verify if the human brain can successfully adapt to managing this unscripted, seamless continuum, the framework proposes three validation protocols:
+1.  **Closed-Loop Coherence Learning**: Track the rate at which a manual user (0-Star mode) can voluntarily shift their Pz-coherence peak from Beta (propulsion) to Alpha (stabilization) to defend against highly precise 5★ AI bots. If the learning curve of the user is logarithmic, it proves the brain is naturally maping its internal states onto the fluid's physical phase transitions.
+2.  **Autonomous AI Cognitive Emulation**: Run equal-skill, 5★ vs 5★ matchups where the bots are programmed to simulate their own internal 100-Hz "EEG state" instead of using action scripts. The AI shifting its "mental spectrum" to Theta for shield defense or Gamma for strike disruption based on local fluid coordinates validates the mathematical stability of the continuum under game theory conditions.
+3.  **Cross-Device Resonant Synchronization**: Place two distinct operators (e.g. Parent and Child BCI headbands) on the same workspace. Real-time mathematical cross-coherence (imaginary PLV between the two independent headbands) generates an "orbital gravity tether" in the fluid. Testing if the two operators can cooperatively maintain a stable orbital distance using mutual focus validates the social/collaborative potential of continuous BCI esports.
+
+---
+
 ## 🎮 System Features
 
 ### 🌌 Alchemical Workshop & Cauldron Hub
