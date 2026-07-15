@@ -1,3 +1,4 @@
+// src/lib/WebGLRenderer.ts
 export class WebGLFluidRenderer {
   gl: WebGLRenderingContext | WebGL2RenderingContext;
   program: WebGLProgram;
@@ -80,8 +81,8 @@ export class WebGLFluidRenderer {
       }
 
       void main() {
-          vec3 color = vec3(0.047, 0.047, 0.047);
-          float tf = u_time * 12.0; // Match the CPU wave frequency exactly
+          vec3 baseBg = vec3(0.047, 0.047, 0.047);
+          float tf = u_time * 12.0;
           
           vec2 centered = v_texcoord - 0.5;
           float cos_a = cos(-u_angle);
@@ -94,9 +95,12 @@ export class WebGLFluidRenderer {
           vec2 camCoord = (rotated * u_zoom) + u_cameraCOM;
           
           if (camCoord.x < 0.0 || camCoord.x > 1.0 || camCoord.y < 0.0 || camCoord.y > 1.0) {
-              gl_FragColor = vec4(color, 1.0);
+              gl_FragColor = vec4(baseBg, 1.0);
               return;
           }
+          
+          vec3 accumulatedColor = vec3(0.0);
+          float pi = 3.14159265;
           
           for(int i=0; i<8; i++) {
               if (i >= u_numElements) break;
@@ -111,13 +115,26 @@ export class WebGLFluidRenderer {
               
               float tfScale = tf * (1.0 - float(i) * 0.12);
               float wave = re * cos(tfScale) - im * sin(tfScale);
-              
               float w = abs(wave) * u_stripeContrast;
               
-              color += u_colors[i] * clamp(w, 0.0, 1.0);
+              // Procedural Inigo Quilez cosine-based colormap from the Python framework
+              float t = float(i) / float(u_numElements);
+              vec3 elementColor = 0.5 + 0.5 * cos(2.0 * pi * (t + vec3(0.0, 0.33, 0.67)));
+              
+              accumulatedColor += elementColor * clamp(w, 0.0, 1.0);
           }
           
-          gl_FragColor = vec4(min(color, vec3(1.0)), 1.0);
+          // Extract non-linear wave interference fringes (sine-wave contours)
+          float waveSum = length(accumulatedColor);
+          float fringes = 0.4 + 0.6 * abs(sin(waveSum * 12.0));
+          
+          // Gamma compression to elevate faint background waves and modulate with fringes
+          vec3 finalColor = pow(accumulatedColor, vec3(0.6)) * fringes;
+          
+          // Smoothly blend back to dark base background at zero alchemical energy
+          finalColor = mix(baseBg, clamp(finalColor, vec3(0.0), vec3(1.0)), clamp(waveSum * 5.0, 0.0, 1.0));
+          
+          gl_FragColor = vec4(finalColor, 1.0);
       }
     `;
 

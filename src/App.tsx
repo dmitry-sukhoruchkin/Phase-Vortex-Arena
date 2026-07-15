@@ -9,7 +9,7 @@ import { multiplayerService } from './lib/MultiplayerService';
 import { audioEngine } from './lib/AudioEngine';
 import { CampaignManager } from './lib/campaign';
 
-import { CampaignHub } from './components/CampaignHub';
+import { CampaignHub, Teammate } from './components/CampaignHub';
 import { SandboxMenu } from './components/SandboxMenu';
 import { PostMatchHUD, CultivatorStats } from './components/PostMatchHUD';
 import { ArenaHUD } from './components/ArenaHUD';
@@ -28,9 +28,78 @@ export default function App() {
      gpuEnabled: true,
      p1CustomVec: [0.577, 0.577, 0.577] as [number, number, number],
      p2CustomVec: [0.577, 0.577, 0.577] as [number, number, number],
-     p1Stars: 0, // По умолчанию 0 - управляем сами
+     p1Stars: 0,
      p2Stars: 3
   });
+
+  // --- STATE: PERSISTENT TEAMMATES & ALLIES ---
+  const [teammates, setTeammates] = useState<Teammate[]>([
+    { 
+       id: 'player', 
+       name: "The Grand Ascendant (You)", 
+       stars: 0, 
+       vector: [0.577, 0.577, 0.577], 
+       color: [255, 200, 255], 
+       power: 0, 
+       defense: 0, 
+       focus: 0, 
+       isActive: true, 
+       isUnlocked: true, 
+       essenceCostToUnlock: 0 
+    },
+    { 
+       id: 'companion_1', 
+       name: "Yin Disciple", 
+       stars: 1, 
+       vector: [0.0, 0.447, 0.894], 
+       color: [0, 150, 255], 
+       power: 0, 
+       defense: 0, 
+       focus: 0, 
+       isActive: true, 
+       isUnlocked: false, 
+       essenceCostToUnlock: 150 
+    },
+    { 
+       id: 'companion_2', 
+       name: "Yang Berserker", 
+       stars: 2, 
+       vector: [0.894, 0.447, 0.0], 
+       color: [255, 100, 0], 
+       power: 0, 
+       defense: 0, 
+       focus: 0, 
+       isActive: false, 
+       isUnlocked: false, 
+       essenceCostToUnlock: 300 
+    },
+    { 
+       id: 'companion_3', 
+       name: "SMR Catalyst", 
+       stars: 3, 
+       vector: [0.0, 0.894, 0.447], 
+       color: [0, 255, 50], 
+       power: 0, 
+       defense: 0, 
+       focus: 0, 
+       isActive: false, 
+       isUnlocked: false, 
+       essenceCostToUnlock: 450 
+    },
+    { 
+       id: 'companion_4', 
+       name: "Vortex Sage", 
+       stars: 4, 
+       vector: [0.577, 0.577, 0.577], 
+       color: [200, 0, 255], 
+       power: 0, 
+       defense: 0, 
+       focus: 0, 
+       isActive: false, 
+       isUnlocked: false, 
+       essenceCostToUnlock: 600 
+    }
+  ]);
 
   // --- STATE: CAMPAIGN PROGRESSION ---
   const [campaignIndex, setCampaignIndex] = useState<number>(-1);
@@ -38,12 +107,6 @@ export default function App() {
   const [essence, setEssence] = useState<number>(0);
   const [campaignGpu, setCampaignGpu] = useState<boolean>(true);
   const [realmWon, setRealmWon] = useState<boolean>(false);
-  
-  const [upgrades, setUpgrades] = useState({
-    power: 0,   
-    defense: 0, 
-    focus: 0    
-  });
 
   // --- ARENA VARIABLES ---
   const [arena, setArena] = useState<PhaseVortexArena | null>(null);
@@ -52,18 +115,16 @@ export default function App() {
   const [gridRes, setGridRes] = useState<number>(80);
   const [useWebGL, setUseWebGL] = useState<boolean>(true);
   
-  // Режим камеры
   const [cameraMode, setCameraMode] = useState<'CENTERED' | 'FIXED'>('CENTERED');
 
   const DEFAULT_SETTINGS = {
      hbar: 120.0, decay: 0.9992, injectionRadius: 0.05, injectionIntensity: 150.0,
      cahnHilliardSharpen: 4.0, couplingStrength: 25.0, pacStrength: 6.5,
      stripeFreq: 22.0, stripeContrast: 1.5, springStiffness: 200.0, tensionTear: 2.0,
-     timeScale: 0.20 // Медленная физика по умолчанию, чтобы всё успеть рассмотреть
+     timeScale: 0.20
   };
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
-  // Стейты послематчевого дашборда
   const [matchResult, setMatchResult] = useState<'VICTORY' | 'DEFEAT' | null>(null);
   const [endMatchStats, setEndMatchStats] = useState<CultivatorStats[]>([]);
 
@@ -77,7 +138,6 @@ export default function App() {
   const [touchMove, setTouchMove] = useState({ dx: 0, dy: 0 });
   const touchKeys = useRef<{ [key: string]: boolean }>({});
   
-  // P2P State
   const [myId, setMyId] = useState('');
   const [peerId, setPeerId] = useState('');
   const [p2pConnected, setP2pConnected] = useState(false);
@@ -101,6 +161,7 @@ export default function App() {
     };
 
     const handleKeyDown = (e: KeyboardEvent) => (keys.current[e.key] = true);
+    const handleKeyDownHandled = (e: KeyboardEvent) => (keys.current[e.key] = true);
     const handleKeyUp = (e: KeyboardEvent) => (keys.current[e.key] = false);
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
@@ -110,7 +171,7 @@ export default function App() {
     };
   }, []);
 
-  // --- ENGINE RUN: CAMPAIGN LOADER ---
+  // --- ENGINE RUN: CAMPAIGN LOADER WITH DYNAMIC PLAYER SQUAD ---
   const loadCampaignRealm = (index: number) => {
     const realm = CampaignManager.getRealm(index);
     if (!realm) {
@@ -121,29 +182,100 @@ export default function App() {
     
     setCampaignIndex(index);
     setRealmWon(false);
-    
-    const p1Conf = SEMANTIC_PILLS_DB[realm.playerPill] || SEMANTIC_PILLS_DB["Foundation Pill"];
-    const p2Conf = SEMANTIC_PILLS_DB[realm.enemyPill] || SEMANTIC_PILLS_DB["Foundation Pill"];
-    
-    const pStars = Array(realm.teamSize).fill(realm.companionStars);
-    pStars[0] = realm.playerStars; 
-    const eStars = Array(realm.teamSize).fill(realm.enemyStars);
-    
+
+    // Symmetrically resolve safe fallback arrays for teammates list
+    const safeTeammates = teammates && teammates.length > 0 ? teammates : [
+      { 
+         id: 'player', 
+         name: "The Grand Ascendant (You)", 
+         stars: 0, 
+         vector: [0.577, 0.577, 0.577] as [number, number, number], 
+         color: [255, 200, 255] as [number, number, number], 
+         power: 0, 
+         defense: 0, 
+         focus: 0, 
+         isActive: true, 
+         isUnlocked: true, 
+         essenceCostToUnlock: 0 
+      }
+    ];
+
+    // Assemble Player's custom squad up to the level's allowed teamSize safely
+    const activeAllies = safeTeammates.filter(t => t && t.isActive && t.id !== 'player');
+    const deployedTeammates: Teammate[] = [safeTeammates[0]]; 
+
+    for (let i = 0; i < realm.teamSize - 1; i++) {
+      if (i < activeAllies.length) {
+         deployedTeammates.push(activeAllies[i]);
+      } else {
+         const unlockedAllies = safeTeammates.filter(t => t && t.isUnlocked && t.id !== 'player' && !deployedTeammates.includes(t));
+         if (unlockedAllies.length > 0) {
+            deployedTeammates.push(unlockedAllies[0]);
+         } else {
+            // Dummy alchemical fallback teammate to pad the squad array safely
+            deployedTeammates.push({
+               id: `dummy_${i}`,
+               name: `Alchemical Proxy ${i + 1}`,
+               stars: 1,
+               vector: [0.577, 0.577, 0.577],
+               color: [255, 255, 255],
+               power: 0,
+               defense: 0,
+               focus: 0,
+               isActive: false,
+               isUnlocked: true,
+               essenceCostToUnlock: 0
+            });
+         }
+      }
+    }
+
+    const playerParams = deployedTeammates.map((t, idx) => {
+       const safeT = t || {
+          name: "Alchemical Proxy",
+          vector: [0.577, 0.577, 0.577] as [number, number, number],
+          color: [255, 255, 255] as [number, number, number],
+          stars: 1,
+          power: 0,
+          defense: 0,
+          focus: 0
+       };
+       return {
+          name: safeT.name || "Alchemical Proxy",
+          vector: safeT.vector || [0.577, 0.577, 0.577],
+          color: safeT.color || [255, 255, 255],
+          stars: idx === 0 ? realm.playerStars : (safeT.stars || 1), 
+          isPlayer: idx === 0 && realm.playerStars === 0,
+          powerLvl: safeT.power || 0,
+          defenseLvl: safeT.defense || 0,
+          focusLvl: safeT.focus || 0
+       };
+    });
+
+    // Assemble Hardcoded Enemy Team for the level with safe element properties
+    const enemyConfig = SEMANTIC_PILLS_DB[realm.enemyPill] || SEMANTIC_PILLS_DB["Foundation Pill"];
+    const enemyParams = Array(realm.teamSize).fill(null).map((_, idx) => ({
+       name: `${realm.enemyPill} Core ${idx + 1}`,
+       vector: enemyConfig.vector || [0.577, 0.577, 0.577],
+       color: enemyConfig.color || [255, 200, 255],
+       stars: realm.enemyStars,
+       isPlayer: false,
+       powerLvl: idx, 
+       defenseLvl: idx,
+       focusLvl: idx
+    }));
+
     const playMode = realm.playerStars > 0 ? 'BvsB' : 'PvsB';
-    
-    // Автоматическая фиксация камеры на арене в авторежимах (BvsB)
     setCameraMode(realm.playerStars > 0 ? 'FIXED' : 'CENTERED');
+    setSettings(DEFAULT_SETTINGS); 
 
-    const campaignSettings = {
-       ...settings,
-       injectionIntensity: 150.0 + (upgrades.power * 35.0),
-       springStiffness: 200.0 + (upgrades.defense * 45.0),
-       tensionTear: 2.0 + (upgrades.defense * 0.4),
-       couplingStrength: 25.0 + (upgrades.focus * 6.0)
-    };
-    setSettings(campaignSettings);
-
-    const newArena = new PhaseVortexArena(p1Conf, p2Conf, realm.teamSize, playMode, 80, realm.numElements, campaignGpu, pStars, eStars);
+    const newArena = new PhaseVortexArena(
+       playerParams,
+       enemyParams,
+       80,
+       realm.numElements,
+       campaignGpu
+    );
     
     setArena(newArena);
     setMode(playMode);
@@ -162,7 +294,7 @@ export default function App() {
            return {
               name: "Custom Pill",
               vector: [customVec[0]/norm, customVec[1]/norm, customVec[2]/norm],
-              color: [customVec[0]/norm*255, customVec[1]/norm*255, customVec[2]/norm*255],
+              color: [Math.round(customVec[0]/norm*255), Math.round(customVec[1]/norm*255), Math.round(customVec[2]/norm*255)],
               desc: "Custom Element Mix"
            };
        }
@@ -173,13 +305,37 @@ export default function App() {
     const p1Conf = buildPillConfig(sandboxConfig.p1Pill, sandboxConfig.p1CustomVec);
     const p2Conf = buildPillConfig(sandboxConfig.p2Pill, sandboxConfig.p2CustomVec);
 
-    const pStars = [sandboxConfig.p1Stars];
-    const eStars = [sandboxConfig.p2Stars];
+    const playerParams = Array(sandboxConfig.teamSize).fill(null).map((_, i) => ({
+       name: i === 0 ? "Player (You)" : `Ally ${i}`,
+       vector: p1Conf.vector || [0.577, 0.577, 0.577],
+       color: p1Conf.color || [255, 255, 255],
+       stars: i === 0 ? sandboxConfig.p1Stars : 3,
+       isPlayer: (sandboxConfig.mode === 'PvsB' || sandboxConfig.mode === 'PvsP') && i === 0,
+       powerLvl: 0,
+       defenseLvl: 0,
+       focusLvl: 0
+    }));
 
-    // Автоматическая фиксация камеры, если играет только ИИ
+    const enemyParams = Array(sandboxConfig.teamSize).fill(null).map((_, i) => ({
+       name: `Adversary ${i + 1}`,
+       vector: p2Conf.vector || [0.577, 0.577, 0.577],
+       color: p2Conf.color || [255, 255, 255],
+       stars: sandboxConfig.p2Stars,
+       isPlayer: false,
+       powerLvl: 0,
+       defenseLvl: 0,
+       focusLvl: 0
+    }));
+
     setCameraMode(sandboxConfig.p1Stars > 0 ? 'FIXED' : 'CENTERED');
 
-    const newArena = new PhaseVortexArena(p1Conf, p2Conf, sandboxConfig.teamSize, sandboxConfig.mode, sandboxConfig.gridRes, sandboxConfig.numElements, sandboxConfig.gpuEnabled, pStars, eStars);
+    const newArena = new PhaseVortexArena(
+       playerParams,
+       enemyParams,
+       sandboxConfig.gridRes,
+       sandboxConfig.numElements,
+       sandboxConfig.gpuEnabled
+    );
     
     setArena(newArena);
     setMode(sandboxConfig.mode);
@@ -287,7 +443,6 @@ export default function App() {
         setTime(arena.time);
         if (p1) audioEngine.update(p1.vx, p1.shearStress, p1.KActive);
 
-        // Условие конца боя (теперь мертвые отсекаются по IsDead)
         const team0Alive = arena.cultivators.some(c => c.team === 0 && !c.isDead);
         const team1Alive = arena.cultivators.some(c => c.team === 1 && !c.isDead);
 
@@ -313,18 +468,6 @@ export default function App() {
         }
       }
 
-      const colorsPalette = [
-         [255, 25, 25],
-         [25, 255, 25],
-         [25, 75, 255],
-         [255, 200, 25],
-         [25, 200, 255],
-         [200, 25, 255],
-         [255, 128, 25],
-         [128, 255, 128]
-      ];
-
-      // Отрисовка жидкостей с учетом режима камеры (Fixed/Centered)
       if (useWebGL && webglRendererRef.current && arena.cultivators[0]) {
          const p0 = arena.cultivators[0];
          const pxNorm = cameraMode === 'CENTERED' ? p0.pos.x / 800.0 : 0.5;
@@ -350,20 +493,41 @@ export default function App() {
                 continue;
              }
 
-             let rSum = 0, gSum = 0, bSum = 0;
+             let accumR = 0;
+             let accumG = 0;
+             let accumB = 0;
+
              for (let ch = 0; ch < numElements; ch++) {
                 const re = arena.fluid.density[ch * 2][i];
                 const im = arena.fluid.density[ch * 2 + 1][i];
                 const wave = re * Math.cos(tf * (1.0 - ch * 0.12)) - im * Math.sin(tf * (1.0 - ch * 0.12));
-                const w = Math.abs(wave) * settings.stripeContrast;
+                const w = Math.max(0.0, Math.min(1.0, Math.abs(wave) * settings.stripeContrast));
                 
-                rSum += colorsPalette[ch % colorsPalette.length][0] * w;
-                gSum += colorsPalette[ch % colorsPalette.length][1] * w;
-                bSum += colorsPalette[ch % colorsPalette.length][2] * w;
+                // Symmetrical Inigo Quilez procedural cosine colormap mapped to CPU renderer
+                const t = ch / numElements;
+                const col_r = 0.5 + 0.5 * Math.cos(2 * Math.PI * (t + 0.0));
+                const col_g = 0.5 + 0.5 * Math.cos(2 * Math.PI * (t + 0.33));
+                const col_b = 0.5 + 0.5 * Math.cos(2 * Math.PI * (t + 0.67));
+
+                accumR += col_r * w;
+                accumG += col_g * w;
+                accumB += col_b * w;
              }
-             data[i * 4] = Math.min(255, Math.max(12, rSum));
-             data[i * 4 + 1] = Math.min(255, Math.max(12, gSum));
-             data[i * 4 + 2] = Math.min(255, Math.max(12, bSum));
+
+             // Apply non-linear wave interference fringes (sine-wave contours) on CPU
+             const waveSum = Math.hypot(accumR, Math.hypot(accumG, accumB));
+             const fringes = 0.4 + 0.6 * Math.abs(Math.sin(waveSum * 12.0));
+
+             // Apply Gamma compression (pow 0.6) and fringes modulation
+             let finalR = Math.pow(accumR, 0.6) * fringes;
+             let finalG = Math.pow(accumG, 0.6) * fringes;
+             let finalB = Math.pow(accumB, 0.6) * fringes;
+
+             // Symmetrically blend back to base background (12, 12, 12) at zero alchemical energy
+             const blendCoeff = Math.max(0.0, Math.min(1.0, waveSum * 5.0));
+             data[i * 4]     = Math.round(12 * (1.0 - blendCoeff) + Math.max(0, Math.min(255, finalR * 255)) * blendCoeff);
+             data[i * 4 + 1] = Math.round(12 * (1.0 - blendCoeff) + Math.max(0, Math.min(255, finalG * 255)) * blendCoeff);
+             data[i * 4 + 2] = Math.round(12 * (1.0 - blendCoeff) + Math.max(0, Math.min(255, finalB * 255)) * blendCoeff);
              data[i * 4 + 3] = 255;
           }
           const offscreen = document.createElement('canvas');
@@ -388,7 +552,6 @@ export default function App() {
 
       const p0 = arena.cultivators[0];
       if (p0) {
-        // ИСПРАВЛЕНИЕ: Матрицы поворота getScreenCoords теперь идеально синхронизированы в одном направлении!
         const theta = cameraMode === 'CENTERED' ? -p0.angle : 0.0;
         const cos_t = Math.cos(theta);
         const sin_t = Math.sin(theta);
@@ -406,7 +569,7 @@ export default function App() {
         };
 
         for (const c of arena.cultivators) {
-          if (c.isDead) continue; // Мертвые не рисуются
+          if (c.isDead) continue;
 
           for (let i = 0; i < c.nodes.length; i++) {
             const node = c.nodes[i];
@@ -471,10 +634,10 @@ export default function App() {
             </h1>
             <p className="mb-8 text-slate-400">Tactical Alchemical Wave Simulator</p>
             <div className="space-y-4">
-               <button className="w-full py-4 bg-indigo-900/50 border border-indigo-500 text-white font-bold hover:bg-indigo-700 cursor-pointer" onClick={() => setGameState('CAMPAIGN_HUB')}>
+               <button className="w-full py-4 bg-indigo-900/50 border border-indigo-500 text-white font-bold hover:bg-indigo-700 cursor-pointer text-sm" onClick={() => setGameState('CAMPAIGN_HUB')}>
                   ALCHEMICAL CAMPAIGN
                </button>
-               <button className="w-full py-4 bg-cyan-900/30 border border-cyan-800 text-cyan-200 font-bold hover:bg-cyan-800/50 cursor-pointer" onClick={() => setGameState('SANDBOX_MENU')}>
+               <button className="w-full py-4 bg-cyan-900/30 border border-cyan-800 text-cyan-200 font-bold hover:bg-cyan-800/50 cursor-pointer text-sm" onClick={() => setGameState('SANDBOX_MENU')}>
                   SANDBOX / DEBUGGER
                </button>
             </div>
@@ -499,18 +662,13 @@ export default function App() {
   if (gameState === 'CAMPAIGN_HUB') {
     return (
        <CampaignHub 
+          teammates={teammates}
+          setTeammates={setTeammates}
           maxRealmReached={maxRealmReached}
           essence={essence}
+          setEssence={setEssence}
           campaignGpu={campaignGpu}
           setCampaignGpu={setCampaignGpu}
-          upgrades={upgrades}
-          onBuyUpgrade={(stat) => {
-             const cost = 150;
-             if (essence >= cost) {
-                setEssence(e => e - cost);
-                setUpgrades(prev => ({ ...prev, [stat]: prev[stat] + 1 }));
-             }
-          }}
           onEnterRealm={loadCampaignRealm}
           onBack={() => setGameState('MENU')}
        />
@@ -564,7 +722,6 @@ export default function App() {
           onAbort={() => setGameState(campaignIndex >= 0 ? 'CAMPAIGN_HUB' : 'SANDBOX_MENU')}
         />
 
-        {/* Тачпад активен только если Player 1 не автоматизирован и под ручным контролем */}
         {(!arena?.cultivators[0] || arena.cultivators[0].stars === 0) && (
            <TouchControls 
              onMove={(dx, dy) => setTouchMove({dx, dy})} 

@@ -56,6 +56,10 @@ export class Cultivator {
   stars: number = 3;
   isDead: boolean = false;
 
+  powerLvl: number = 0;
+  defenseLvl: number = 0;
+  focusLvl: number = 0;
+
   damageDealt: number = 0;
   damageTaken: number = 0;
   aiLog: string = "Analyzing battlefield...";
@@ -63,9 +67,13 @@ export class Cultivator {
   constructor(id: string, isPlayer: boolean, x: number, y: number, pill: PillConfig, stars: number = 3) {
     this.id = id;
     this.isPlayer = isPlayer;
-    this.pillName = pill.name;
-    this.vector = pill.vector;
-    this.color = pill.color;
+    
+    // Robust fallbacks to prevent rendering crashes on incomplete objects
+    const safePill = pill || { name: "Foundation Pill", vector: [0.577, 0.577, 0.577], color: [255, 200, 255] };
+    this.pillName = safePill.name || "Foundation Pill";
+    this.vector = safePill.vector || [0.577, 0.577, 0.577];
+    this.color = safePill.color || [255, 200, 255];
+    
     this.pos = { x, y };
     this.angle = isPlayer ? 0 : Math.PI;
 
@@ -126,7 +134,13 @@ export class PhaseVortexArena {
   time: number = 0;
   numElements: number = 3;
 
-  constructor(p1Config: PillConfig, p2Config: PillConfig, teamSize: number = 1, mode: string = 'PvsB', gridRes: number = 70, numElements: number = 3, gpuEnabled: boolean = true, playerStars: number[] = [], enemyStars: number[] = []) {
+  constructor(
+    playerParams: { name: string; vector: [number, number, number]; color: [number, number, number]; stars: number; isPlayer: boolean; powerLvl: number; defenseLvl: number; focusLvl: number }[],
+    enemyParams: { name: string; vector: [number, number, number]; color: [number, number, number]; stars: number; isPlayer: boolean; powerLvl: number; defenseLvl: number; focusLvl: number }[],
+    gridRes: number = 80,
+    numElements: number = 3,
+    gpuEnabled: boolean = true
+  ) {
     this.numElements = numElements;
     
     if (gpuEnabled) {
@@ -142,19 +156,45 @@ export class PhaseVortexArena {
 
     this.cultivators = [];
     
-    for(let i=0; i<teamSize; i++) {
-      const isPlayer = (mode === 'PvsB' && i === 0);
-      const pStars = playerStars[i] !== undefined ? playerStars[i] : (isPlayer ? 0 : 3);
-      const c = new Cultivator('p'+i, isPlayer, CONFIG.WIDTH * 0.3, CONFIG.HEIGHT * (0.5 + (i - (teamSize-1)/2)*0.15), p1Config, pStars);
-      c.team = 0;
-      this.cultivators.push(c);
-    }
-    for(let i=0; i<teamSize; i++) {
-      const bStars = enemyStars[i] !== undefined ? enemyStars[i] : 3;
-      const c = new Cultivator('b'+i, false, CONFIG.WIDTH * 0.7, CONFIG.HEIGHT * (0.5 + (i - (teamSize-1)/2)*0.15), p2Config, bStars);
-      c.team = 1;
-      this.cultivators.push(c);
-    }
+    // Spawn player's squad using dynamic parameter structures
+    (playerParams || []).forEach((p, idx) => {
+       const safeP = p || { name: "Proxy", vector: [0.577, 0.577, 0.577], color: [255,255,255], stars: 1, isPlayer: false, powerLvl: 0, defenseLvl: 0, focusLvl: 0 };
+       const c = new Cultivator(
+         'p' + idx,
+         safeP.isPlayer,
+         CONFIG.WIDTH * 0.3,
+         CONFIG.HEIGHT * (0.5 + (idx - (playerParams.length - 1) / 2) * 0.15),
+         { name: safeP.name, vector: safeP.vector, color: safeP.color },
+         safeP.stars
+       );
+       c.team = 0;
+       c.powerLvl = safeP.powerLvl;
+       c.defenseLvl = safeP.defenseLvl;
+       c.focusLvl = safeP.focusLvl;
+       
+       c.K = 30.0 + safeP.focusLvl * 5.0; // Apply individual Kuramoto base upgrades
+       this.cultivators.push(c);
+    });
+
+    // Spawn enemy's squad using dynamic parameter structures
+    (enemyParams || []).forEach((e, idx) => {
+       const safeE = e || { name: "Adversary", vector: [0.577, 0.577, 0.577], color: [255,200,255], stars: 1, isPlayer: false, powerLvl: 0, defenseLvl: 0, focusLvl: 0 };
+       const c = new Cultivator(
+         'b' + idx,
+         safeE.isPlayer,
+         CONFIG.WIDTH * 0.7,
+         CONFIG.HEIGHT * (0.5 + (idx - (enemyParams.length - 1) / 2) * 0.15),
+         { name: safeE.name, vector: safeE.vector, color: safeE.color },
+         safeE.stars
+       );
+       c.team = 1;
+       c.powerLvl = safeE.powerLvl;
+       c.defenseLvl = safeE.defenseLvl;
+       c.focusLvl = safeE.focusLvl;
+       
+       c.K = 30.0 + safeE.focusLvl * 5.0; // Apply individual Kuramoto base upgrades
+       this.cultivators.push(c);
+    });
   }
 
   injectDomainExplosion(pos: {x: number, y: number}, vector: [number, number, number], scale: number, isYang: boolean) {
@@ -434,7 +474,8 @@ export class PhaseVortexArena {
       const phase_cos = Math.cos(tf);
       const phase_sin = Math.sin(tf);
 
-      const intensity = activeSettings.injectionIntensity;
+      // Dynamically apply individual power upgrades (boosting amplitude by +15% per power level)
+      const intensity = activeSettings.injectionIntensity * (1.0 + c.powerLvl * 0.15);
 
       for (let y = -radius_wave; y <= radius_wave; y++) {
         for (let x = -radius_wave; x <= radius_wave; x++) {
@@ -548,7 +589,8 @@ export class PhaseVortexArena {
         ) + 1e-5;
         const strain = d_curr / d_rest_tear;
         
-        const T_tear = c.spatialVal >= 0 ? (2.0 + c.spatialVal * 98.0) : (2.0 + (c.spatialVal + 1.0) * 1.5) * (activeSettings.tensionTear / 2.0);
+        // Dynamically apply individual defense upgrades to tear threshold (+10% per level)
+        const T_tear = (c.spatialVal >= 0 ? (2.0 + c.spatialVal * 98.0) : (2.0 + (c.spatialVal + 1.0) * 1.5) * (activeSettings.tensionTear / 2.0)) * (1.0 + c.defenseLvl * 0.10);
 
         let intact = node_I.intact && node_J.intact;
         if (strain > T_tear) {
@@ -557,7 +599,8 @@ export class PhaseVortexArena {
         }
 
         if (intact) {
-          const k_neighbor = activeSettings.springStiffness * (Math.max(0.0, c.spatialVal) + 1.0);
+          // Dynamically apply individual defense upgrades to spring stiffness (+20% per level)
+          const k_neighbor = activeSettings.springStiffness * (Math.max(0.0, c.spatialVal) + 1.0) * (1.0 + c.defenseLvl * 0.20);
           const f_mag = k_neighbor * (d_curr - d_rest);
           const fx = (dx_spring / d_curr) * f_mag;
           const fy = (dy_spring / d_curr) * f_mag;
